@@ -424,3 +424,37 @@ app.get('/admin', (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('SENTINEL ONLINE'));
+
+// ---------------------------------------------------------
+// 4. SYSTEM HEALTH & STATUS RUNTIME
+// ---------------------------------------------------------
+app.get('/api/health', async (req, res) => {
+    // 1. Analytics & Database Status
+    const status = {
+        analytics: 'ONLINE', // If this code runs, the server is online
+        database: mongoose.connection.readyState === 1 ? 'ONLINE' : 'OFFLINE',
+        mainSite: 'OFFLINE',
+        checkIns: 'OFFLINE'
+    };
+
+    // 2. Ping Main Site (GitHub Pages)
+    try {
+        await axios.get('https://letrollologist.github.io/anya.github.io/index.html', { timeout: 5000 });
+        status.mainSite = 'ONLINE';
+    } catch (e) {
+        status.mainSite = 'OFFLINE';
+    }
+
+    // 3. Ping Check-ins Server (Ngrok)
+    try {
+        const ngrokUrl = 'https://overdefensively-unabjective-eilene.ngrok-free.dev/';
+        // We just need the headers, so a HEAD request is faster and lighter
+        await axios.head(ngrokUrl, { timeout: 5000 });
+        status.checkIns = 'ONLINE';
+    } catch (e) {
+        // If it times out or throws a 404/502 (ngrok offline), mark as offline
+        status.checkIns = 'OFFLINE';
+    }
+
+    res.json(status);
+});
