@@ -2,10 +2,32 @@ const express = require('express');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
-app.use(express.json());
-app.use(cors()); // Allow all origins so GitHub Pages can POST to /log
+app.set('trust proxy', 1); // Required for accurate IPs behind Render's proxy
+app.use(express.json({ limit: '10kb' })); // Reject oversized payloads
+
+// CORS: only allow your GitHub Pages origin to POST to /log
+const logCors = cors({ origin: 'https://letrollologist.github.io' });
+
+// Rate limiter for /log: max 10 hits per minute per IP (prevents log flooding)
+const logLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'RATE LIMITED'
+});
+
+// Rate limiter for admin routes: max 30 requests per minute per IP
+const adminLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'RATE LIMITED'
+});
 
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("SYSTEM ONLINE: Neural Link Established"))
@@ -58,7 +80,7 @@ function parseUA(ua) {
 // 1. INGESTION ROUTE — receives data from GitHub Pages
 //    URL: POST https://analytics-server-bdrm.onrender.com/log
 // ---------------------------------------------------------
-app.post('/log', async (req, res) => {
+app.post('/log', logCors, logLimiter, async (req, res) => {
     try {
         const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
         const cleanIp = ip.split(',')[0].trim();
@@ -67,7 +89,7 @@ app.post('/log', async (req, res) => {
 
         let geo = {};
         if (!isLocal) {
-            const geoResponse = await axios.get(`http://ip-api.com/json/${cleanIp}`).catch(() => ({ data: {} }));
+            const geoResponse = await axios.get(`http://ip-api.com/json/${cleanIp}`, { timeout: 4000 }).catch(() => ({ data: {} }));
             geo = geoResponse.data;
         } else {
             geo = { city: "Localhost", regionName: "LAN", country: "Internal Matrix", isp: "Local Network", lat: 0, lon: 0 };
@@ -103,14 +125,18 @@ app.post('/log', async (req, res) => {
 // 2. TELEMETRY ROUTE — feeds the admin dashboard
 //    URL: GET https://analytics-server-bdrm.onrender.com/api/telemetry?pw=...
 // ---------------------------------------------------------
-app.get('/api/telemetry', async (req, res) => {
-    const secret = process.env.ADMIN_PW || "admin123";
+app.get('/api/telemetry', adminLimiter, async (req, res) => {
+    // Set ADMIN_PW in Render environment variables — never leave as default
+    const secret = process.env.ADMIN_PW;
+    if (!secret) return res.status(500).json({ error: "SERVER MISCONFIGURED" });
     if (req.query.pw !== secret) return res.status(401).json({ error: "ACCESS DENIED" });
 
     try {
         const match = {};
         if (req.query.search) {
-            const regex = new RegExp(req.query.search, 'i');
+            // Escape all regex special chars to prevent ReDoS attacks
+            const escaped = req.query.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 50);
+            const regex = new RegExp(escaped, 'i');
             match.$or = [{ ip: regex }, { isp: regex }, { city: regex }, { country: regex }];
         }
         if (req.query.device && req.query.device !== 'ALL') match.device = req.query.device;
@@ -175,8 +201,9 @@ app.get('/api/health', async (req, res) => {
 // 4. ADMIN DASHBOARD — served at /admin?pw=...
 //    Loads external assets/app.js and assets/style.css
 // ---------------------------------------------------------
-app.get('/admin', (req, res) => {
-    const secret = process.env.ADMIN_PW || "admin123";
+app.get('/admin', adminLimiter, (req, res) => {
+    const secret = process.env.ADMIN_PW;
+    if (!secret) return res.status(500).send("SERVER MISCONFIGURED");
     if (req.query.pw !== secret) return res.status(401).send("ACCESS DENIED");
 
     res.send(`<!DOCTYPE html>
