@@ -19,7 +19,8 @@ createApp({
     methods: {
         async fetchHealth() {
             try {
-                const res = await fetch('api.php?action=health');
+                // Correct Node.js route
+                const res = await fetch('/api/health');
                 if (res.ok) this.health = await res.json();
             } catch (e) {
                 this.health = { database: 'OFFLINE', mainSite: 'OFFLINE', checkIns: 'OFFLINE' };
@@ -28,10 +29,9 @@ createApp({
         async fetchData() {
             this.loading = true;
             try {
-                const params = new URLSearchParams({ action: 'radar', ...this.filters });
-                if (API_PW) params.append('pw', API_PW);
-
-                const res = await fetch('api.php?' + params.toString());
+                const params = new URLSearchParams({ pw: API_PW, ...this.filters });
+                // Correct Node.js route
+                const res = await fetch('/api/telemetry?' + params.toString());
 
                 if (!res.ok) {
                     const errorText = await res.text();
@@ -49,7 +49,16 @@ createApp({
                 }
 
                 this.logs = data.logs || [];
-                this.stats = data.stats || { totalHits: 0, uniqueIPs: 0, devices: [], platforms: [], browsers: [], locations: [], timeline: [] };
+                // Safely merge so charts never receive undefined arrays
+                this.stats = {
+                    totalHits:  data.stats?.totalHits  ?? 0,
+                    uniqueIPs:  data.stats?.uniqueIPs  ?? 0,
+                    devices:    data.stats?.devices    ?? [],
+                    platforms:  data.stats?.platforms  ?? [],
+                    browsers:   data.stats?.browsers   ?? [],
+                    locations:  data.stats?.locations  ?? [],
+                    timeline:   data.stats?.timeline   ?? []
+                };
                 this.updateCharts();
             } catch (e) {
                 console.error("Uplink failed. Reason:", e.message || e);
@@ -69,15 +78,13 @@ createApp({
             if (this.logs.length === 0) return;
             const headers = ['Time', 'Target_IP', 'City', 'Country', 'ISP', 'Hardware', 'OS', 'Browser', 'Page'];
             const rows = this.logs.map(l =>
-                [l.timestamp, l.ip, l.city, l.country, l.isp, l.device, l.platform, l.browser, l.page]
+                [this.formatDate(l.timestamp), l.ip, l.city, l.country, l.isp, l.device, l.platform, l.browser, l.page]
                     .map(v => `"${(v || '').toString().replace(/"/g, '""')}"`)
                     .join(',')
             );
-
             const csvContent = [headers.join(','), ...rows].join('\n');
             const blob = new Blob([csvContent], { type: 'text/csv' });
             const url = URL.createObjectURL(blob);
-
             const a = document.createElement('a');
             a.href = url;
             a.download = `sentinel_intercepts_${new Date().getTime()}.csv`;
@@ -95,6 +102,10 @@ createApp({
         },
         openDeepScan(log) {
             this.selectedLog = log;
+        },
+        formatDate(dateStr) {
+            const d = new Date(dateStr);
+            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour12: false });
         },
         initCharts() {
             Chart.defaults.color = '#666';
@@ -131,21 +142,20 @@ createApp({
         updateCharts() {
             if (!this.charts.timeline) return;
 
-            this.charts.timeline.data.labels = (this.stats.timeline || []).map(t => t._id.substring(5));
-            this.charts.timeline.data.datasets[0].data = (this.stats.timeline || []).map(t => t.count);
+            this.charts.timeline.data.labels = this.stats.timeline.map(t => t._id.substring(5));
+            this.charts.timeline.data.datasets[0].data = this.stats.timeline.map(t => t.count);
             this.charts.timeline.update();
 
-            this.charts.device.data.labels = (this.stats.devices || []).map(d => d._id);
-            this.charts.device.data.datasets[0].data = (this.stats.devices || []).map(d => d.count);
+            this.charts.device.data.labels = this.stats.devices.map(d => d._id);
+            this.charts.device.data.datasets[0].data = this.stats.devices.map(d => d.count);
             this.charts.device.update();
 
-            this.charts.platform.data.labels = (this.stats.platforms || []).map(p => p._id);
-            this.charts.platform.data.datasets[0].data = (this.stats.platforms || []).map(p => p.count);
+            this.charts.platform.data.labels = this.stats.platforms.map(p => p._id);
+            this.charts.platform.data.datasets[0].data = this.stats.platforms.map(p => p.count);
             this.charts.platform.update();
 
-            // FIX: This line was broken/truncated in the original, causing the entire Vue app to crash
-            this.charts.browser.data.labels = (this.stats.browsers || []).map(b => b._id);
-            this.charts.browser.data.datasets[0].data = (this.stats.browsers || []).map(b => b.count);
+            this.charts.browser.data.labels = this.stats.browsers.map(b => b._id);
+            this.charts.browser.data.datasets[0].data = this.stats.browsers.map(b => b.count);
             this.charts.browser.update();
         }
     },
