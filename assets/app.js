@@ -16,10 +16,29 @@ createApp({
             charts: {}
         }
     },
+    computed: {
+        hardwareRows() {
+            const total = (this.stats.devices || []).reduce((a, b) => a + b.count, 0) || 1;
+            return (this.stats.devices || [])
+                .map(d => ({ label: d._id, count: d.count, pct: Math.round((d.count / total) * 100) }))
+                .sort((a, b) => b.count - a.count);
+        },
+        platformRows() {
+            const total = (this.stats.platforms || []).reduce((a, b) => a + b.count, 0) || 1;
+            return (this.stats.platforms || [])
+                .map(p => ({ label: p._id, count: p.count, pct: Math.round((p.count / total) * 100) }))
+                .sort((a, b) => b.count - a.count);
+        },
+        browserRows() {
+            const total = (this.stats.browsers || []).reduce((a, b) => a + b.count, 0) || 1;
+            return (this.stats.browsers || [])
+                .map(b => ({ label: b._id, count: b.count, pct: Math.round((b.count / total) * 100) }))
+                .sort((a, b) => b.count - a.count);
+        }
+    },
     methods: {
         async fetchHealth() {
             try {
-                // Correct Node.js route
                 const res = await fetch('/api/health');
                 if (res.ok) this.health = await res.json();
             } catch (e) {
@@ -30,7 +49,6 @@ createApp({
             this.loading = true;
             try {
                 const params = new URLSearchParams({ pw: API_PW, ...this.filters });
-                // Correct Node.js route
                 const res = await fetch('/api/telemetry?' + params.toString());
 
                 if (!res.ok) {
@@ -49,7 +67,6 @@ createApp({
                 }
 
                 this.logs = data.logs || [];
-                // Safely merge so charts never receive undefined arrays
                 this.stats = {
                     totalHits:  data.stats?.totalHits  ?? 0,
                     uniqueIPs:  data.stats?.uniqueIPs  ?? 0,
@@ -59,7 +76,7 @@ createApp({
                     locations:  data.stats?.locations  ?? [],
                     timeline:   data.stats?.timeline   ?? []
                 };
-                this.updateCharts();
+                this.updateTimeline();
             } catch (e) {
                 console.error("Uplink failed. Reason:", e.message || e);
             } finally {
@@ -100,67 +117,59 @@ createApp({
             clearInterval(this.pollInterval);
             this.pollInterval = setInterval(() => { if (!this.loading) this.fetchData(); }, 5000);
         },
-        openDeepScan(log) {
-            this.selectedLog = log;
-        },
+        openDeepScan(log) { this.selectedLog = log; },
         formatDate(dateStr) {
             const d = new Date(dateStr);
             return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour12: false });
         },
-        initCharts() {
-            Chart.defaults.color = '#666';
+        barColor(index) {
+            return ['#00f3ff', '#ff00ff', '#8b5cf6', '#10b981', '#f59e0b', '#f43f5e'][index % 6];
+        },
+        initTimeline() {
+            Chart.defaults.color = '#555';
             Chart.defaults.font.family = "'JetBrains Mono', monospace";
-
-            const tlCtx = document.getElementById('timelineChart').getContext('2d');
-            this.charts.timeline = new Chart(tlCtx, {
-                type: 'line',
-                data: { labels: [], datasets: [{ label: 'Signals', data: [], borderColor: '#00f3ff', backgroundColor: 'rgba(0, 243, 255, 0.1)', borderWidth: 2, fill: true, tension: 0.3 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }, x: { grid: { display: false } } } }
-            });
-
-            const devCtx = document.getElementById('deviceChart').getContext('2d');
-            this.charts.device = new Chart(devCtx, {
-                type: 'doughnut',
-                data: { labels: [], datasets: [{ data: [], backgroundColor: ['#ff00ff', '#00f3ff', '#3b82f6'], borderWidth: 0 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, cutout: '70%' }
-            });
-
-            const platCtx = document.getElementById('platformChart').getContext('2d');
-            this.charts.platform = new Chart(platCtx, {
-                type: 'doughnut',
-                data: { labels: [], datasets: [{ data: [], backgroundColor: ['#00f3ff', '#ff00ff', '#8b5cf6', '#10b981', '#f59e0b'], borderWidth: 0 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, cutout: '70%' }
-            });
-
-            const broCtx = document.getElementById('browserChart').getContext('2d');
-            this.charts.browser = new Chart(broCtx, {
-                type: 'doughnut',
-                data: { labels: [], datasets: [{ data: [], backgroundColor: ['#fcd34d', '#f43f5e', '#3b82f6', '#10b981', '#a855f7', '#64748b'], borderWidth: 0 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, cutout: '70%' }
+            const ctx = document.getElementById('timelineChart').getContext('2d');
+            this.charts.timeline = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Signals',
+                        data: [],
+                        backgroundColor: 'rgba(0, 243, 255, 0.25)',
+                        borderColor: '#00f3ff',
+                        borderWidth: 1,
+                        borderRadius: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: {
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: { color: '#555', maxTicksLimit: 5 },
+                            beginAtZero: true
+                        },
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: '#555' }
+                        }
+                    }
+                }
             });
         },
-        updateCharts() {
+        updateTimeline() {
             if (!this.charts.timeline) return;
-
-            this.charts.timeline.data.labels = this.stats.timeline.map(t => t._id.substring(5));
-            this.charts.timeline.data.datasets[0].data = this.stats.timeline.map(t => t.count);
+            const tl = this.stats.timeline || [];
+            this.charts.timeline.data.labels = tl.map(t => t._id.substring(5));
+            this.charts.timeline.data.datasets[0].data = tl.map(t => t.count);
             this.charts.timeline.update();
-
-            this.charts.device.data.labels = this.stats.devices.map(d => d._id);
-            this.charts.device.data.datasets[0].data = this.stats.devices.map(d => d.count);
-            this.charts.device.update();
-
-            this.charts.platform.data.labels = this.stats.platforms.map(p => p._id);
-            this.charts.platform.data.datasets[0].data = this.stats.platforms.map(p => p.count);
-            this.charts.platform.update();
-
-            this.charts.browser.data.labels = this.stats.browsers.map(b => b._id);
-            this.charts.browser.data.datasets[0].data = this.stats.browsers.map(b => b.count);
-            this.charts.browser.update();
         }
     },
     mounted() {
-        this.initCharts();
+        this.initTimeline();
         this.fetchHealth();
         this.fetchData();
         this.startPolling();
