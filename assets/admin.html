@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SENTINEL // COMMAND_CENTER</title>
+    <script>
+        const _w = console.warn;
+        console.warn = (...a) => { if (typeof a[0]==='string' && a[0].includes('cdn.tailwindcss.com')) return; _w(...a); };
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=JetBrains+Mono:wght@300;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<div class="scanline"></div>
+<div class="grid-bg"></div>
+
+<div id="app" class="p-4 md:p-6 max-w-[1900px] mx-auto min-h-screen flex flex-col gap-4">
+
+    <!-- ── TOAST ─────────────────────────────────────────────────────────── -->
+    <div v-if="toast.msg" class="fixed top-4 right-4 z-50 cyber-border px-4 py-2 text-xs font-bold uppercase transition-all"
+         :class="toast.type === 'ok' ? 'text-green-400 border-green-500/50' : 'text-red-400 border-red-500/50'">
+        {{ toast.msg }}
+    </div>
+
+    <!-- ── HEADER ─────────────────────────────────────────────────────────── -->
+    <header class="flex flex-col md:flex-row justify-between items-end border-b border-cyan-500/30 pb-4">
+        <div>
+            <div class="flex items-center gap-3 mb-1 flex-wrap">
+                <span class="text-[10px] text-cyan-400/60 uppercase font-bold tracking-widest">Orbital Monitoring Station // V3.0</span>
+                <div class="flex gap-3 text-[9px] uppercase font-bold border border-white/10 px-2 py-1 bg-black/50">
+                    <span>DB: <span :class="health.database==='ONLINE'?'text-green-400':'text-red-500 blink'">{{health.database}}</span></span>
+                    <span>SITE: <span :class="health.mainSite==='ONLINE'?'text-green-400':'text-red-500 blink'">{{health.mainSite}}</span></span>
+                    <span>NGROK: <span :class="health.checkIns==='ONLINE'?'text-green-400':'text-red-500 blink'">{{health.checkIns}}</span></span>
+                    <span v-if="health.uptime" class="text-gray-600">UP: <span class="text-gray-400">{{health.uptime}}</span></span>
+                    <span v-if="health.memMB"  class="text-gray-600">MEM: <span class="text-gray-400">{{health.memMB}}MB</span></span>
+                </div>
+            </div>
+            <h1 class="text-4xl md:text-5xl font-bold glow-text uppercase tracking-widest">Sentinel Core <span class="blink">_</span></h1>
+        </div>
+        <!-- Stat pills -->
+        <div class="flex gap-4 mt-3 md:mt-0 flex-wrap">
+            <div class="stat-pill">
+                <div class="stat-label">Total Hits</div>
+                <div class="text-pink-400 glow-pink text-xl font-bold">{{stats.totalHits}}</div>
+            </div>
+            <div class="stat-pill">
+                <div class="stat-label">Unique IPs</div>
+                <div class="text-cyan-400 glow-text text-xl font-bold">{{stats.uniqueIPs}}</div>
+            </div>
+            <div class="stat-pill">
+                <div class="stat-label">Today</div>
+                <div class="text-green-400 text-xl font-bold">{{stats.todayCount}}</div>
+            </div>
+            <div class="stat-pill">
+                <div class="stat-label">Yesterday</div>
+                <div class="text-yellow-400 text-xl font-bold">{{stats.yesterdayCount}}</div>
+            </div>
+            <div class="stat-pill">
+                <div class="stat-label">Bots</div>
+                <div class="text-red-400 text-xl font-bold">{{stats.botCount}}</div>
+            </div>
+            <div class="stat-pill items-end">
+                <div class="stat-label">Live Uplink</div>
+                <button @click="toggleLive" :class="['btn-cyber text-xs px-3 py-1 mt-1', isLive?'active':'']">
+                    {{isLive?'● LIVE':'○ PAUSED'}}
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- ── TAB NAV ──────────────────────────────────────────────────────────── -->
+    <nav class="flex gap-1 text-[11px] font-bold uppercase tracking-widest">
+        <button v-for="t in tabs" :key="t.id" @click="activeTab=t.id"
+            :class="['tab-btn', activeTab===t.id ? 'tab-active' : '']">
+            {{t.label}}
+        </button>
+    </nav>
+
+    <!-- ════════════════════════════════════════════════════════════════════════
+         TAB: DASHBOARD
+    ════════════════════════════════════════════════════════════════════════ -->
+    <template v-if="activeTab==='dashboard'">
+
+        <!-- Filters -->
+        <div class="cyber-border p-3 flex flex-wrap gap-3 items-center">
+            <span class="text-cyan-400 font-bold uppercase tracking-widest text-xs">&gt; FILTER_MATRIX</span>
+            <input v-model="filters.search" @input="debouncedFetch" type="text"
+                   placeholder="Search IP, ISP, City, Page..." class="flex-1 min-w-[180px] text-xs">
+            <input v-model="filters.dateFrom" @change="fetchData" type="date" class="text-xs" title="From date">
+            <input v-model="filters.dateTo"   @change="fetchData" type="date" class="text-xs" title="To date">
+            <select v-model="filters.device"   @change="fetchData" class="text-xs">
+                <option value="ALL">ALL HARDWARE</option>
+                <option value="Mobile Unit">MOBILE</option>
+                <option value="Desktop Station">DESKTOP</option>
+                <option value="Tablet Unit">TABLET</option>
+            </select>
+            <select v-model="filters.platform" @change="fetchData" class="text-xs">
+                <option value="ALL">ALL OS</option>
+                <option value="iOS Node">iOS</option>
+                <option value="Android Mesh">ANDROID</option>
+                <option value="Windows Core">WINDOWS</option>
+                <option value="MacOS Kernel">MACOS</option>
+                <option value="Linux System">LINUX</option>
+            </select>
+            <select v-model="filters.browser"  @change="fetchData" class="text-xs">
+                <option value="ALL">ALL BROWSERS</option>
+                <option value="Chrome">CHROME</option>
+                <option value="Safari">SAFARI</option>
+                <option value="Firefox">FIREFOX</option>
+                <option value="Edge">EDGE</option>
+                <option value="Opera">OPERA</option>
+            </select>
+            <select v-model="filters.flag" @change="fetchData" class="text-xs">
+                <option value="ALL">ALL FLAGS</option>
+                <option value="bot">BOTS</option>
+                <option value="vpn/proxy">VPN/PROXY</option>
+            </select>
+            <select v-model="pagination.limit" @change="fetchData" class="text-xs">
+                <option value="50">50 / page</option>
+                <option value="100">100 / page</option>
+                <option value="200">200 / page</option>
+            </select>
+            <button @click="resetFilters" class="btn-cyber text-xs">RESET</button>
+            <button @click="exportCSV"   class="btn-cyber text-xs !border-cyan-400 !text-cyan-400">CSV</button>
+        </div>
+
+        <!-- Charts row -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+
+            <!-- Timeline -->
+            <div class="cyber-border p-4">
+                <h3 class="panel-title">Temporal Activity (7D)</h3>
+                <div class="h-[160px]"><canvas id="timelineChart"></canvas></div>
+            </div>
+
+            <!-- Hardware / OS -->
+            <div class="cyber-border p-4 overflow-auto max-h-[240px]">
+                <h3 class="panel-title">Hardware / OS</h3>
+                <div class="text-[9px] text-gray-600 uppercase mb-1">Device</div>
+                <div v-if="!hardwareRows.length" class="no-data">NO DATA</div>
+                <div v-for="(r,i) in hardwareRows" :key="r.label" class="stat-bar-row">
+                    <div class="flex justify-between text-[10px] mb-0.5">
+                        <span class="text-gray-300 truncate max-w-[110px]">{{r.label}}</span>
+                        <span class="font-bold" :style="{color:barColor(i)}">{{r.count}}</span>
+                    </div>
+                    <div class="bar-track"><div class="bar-fill" :style="{width:r.pct+'%',background:barColor(i)}"></div></div>
+                </div>
+                <div class="text-[9px] text-gray-600 uppercase mb-1 mt-3">OS</div>
+                <div v-if="!platformRows.length" class="no-data">NO DATA</div>
+                <div v-for="(r,i) in platformRows" :key="r.label" class="stat-bar-row">
+                    <div class="flex justify-between text-[10px] mb-0.5">
+                        <span class="text-gray-300 truncate max-w-[110px]">{{r.label}}</span>
+                        <span class="font-bold" :style="{color:barColor(i+2)}">{{r.count}}</span>
+                    </div>
+                    <div class="bar-track"><div class="bar-fill" :style="{width:r.pct+'%',background:barColor(i+2)}"></div></div>
+                </div>
+            </div>
+
+            <!-- Browsers -->
+            <div class="cyber-border p-4 overflow-auto max-h-[240px]">
+                <h3 class="panel-title">Browser Engines</h3>
+                <div v-if="!browserRows.length" class="no-data">NO DATA</div>
+                <div v-for="(r,i) in browserRows" :key="r.label" class="stat-bar-row">
+                    <div class="flex justify-between text-[10px] mb-0.5">
+                        <span class="text-gray-300">{{r.label}}</span>
+                        <span class="font-bold" :style="{color:barColor(i)}">{{r.count}} <span class="text-gray-600">({{r.pct}}%)</span></span>
+                    </div>
+                    <div class="bar-track"><div class="bar-fill" :style="{width:r.pct+'%',background:barColor(i)}"></div></div>
+                </div>
+            </div>
+
+            <!-- Top Sectors + Top Pages -->
+            <div class="cyber-border p-4 overflow-auto max-h-[240px]">
+                <h3 class="panel-title !text-pink-500 glow-pink">Top Sectors</h3>
+                <div v-for="loc in stats.locations" :key="loc._id.city" class="flex justify-between items-center text-[10px] mb-2">
+                    <span class="text-gray-300 truncate max-w-[130px]">{{loc._id.city||'?'}}, {{loc._id.country||'?'}}</span>
+                    <div class="flex-1 border-b border-dashed border-cyan-900/40 mx-2"></div>
+                    <span class="text-cyan-400 font-bold">{{loc.count}}</span>
+                </div>
+                <h3 class="panel-title mt-3">Top Pages</h3>
+                <div v-for="pg in stats.pages" :key="pg._id" class="flex justify-between items-center text-[10px] mb-2">
+                    <span class="text-gray-300 truncate max-w-[130px]">{{pg._id}}</span>
+                    <div class="flex-1 border-b border-dashed border-cyan-900/40 mx-2"></div>
+                    <span class="text-yellow-400 font-bold">{{pg.count}}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log table -->
+        <div class="cyber-border flex-1 flex flex-col overflow-hidden">
+            <div class="bg-cyan-500/10 px-4 py-2 border-b border-cyan-500/20 flex justify-between items-center">
+                <h2 class="text-xs font-bold uppercase tracking-widest text-cyan-400">
+                    Signal Log
+                    <span class="text-gray-600 ml-2">({{pagination.total}} total · page {{pagination.page}}/{{pagination.pages}})</span>
+                </h2>
+                <span v-if="loading" class="text-[10px] text-pink-500 blink uppercase">Syncing...</span>
+            </div>
+
+            <div class="flex-1 overflow-auto">
+                <table class="w-full text-left border-collapse whitespace-nowrap">
+                    <thead class="sticky top-0 bg-[#030305] z-10">
+                        <tr class="text-[10px] text-gray-500 uppercase">
+                            <th class="p-2 border-b border-white/5 cursor-pointer hover:text-cyan-400" @click="setSort('timestamp')">
+                                Time {{sortIndicator('timestamp')}}
+                            </th>
+                            <th class="p-2 border-b border-white/5 cursor-pointer hover:text-cyan-400" @click="setSort('ip')">
+                                IP {{sortIndicator('ip')}}
+                            </th>
+                            <th class="p-2 border-b border-white/5">ISP</th>
+                            <th class="p-2 border-b border-white/5 cursor-pointer hover:text-cyan-400" @click="setSort('country')">
+                                Location {{sortIndicator('country')}}
+                            </th>
+                            <th class="p-2 border-b border-white/5">Hardware</th>
+                            <th class="p-2 border-b border-white/5 cursor-pointer hover:text-cyan-400" @click="setSort('browser')">
+                                Browser {{sortIndicator('browser')}}
+                            </th>
+                            <th class="p-2 border-b border-white/5">Page</th>
+                            <th class="p-2 border-b border-white/5">Flags</th>
+                            <th class="p-2 border-b border-white/5">Act</th>
+                        </tr>
+                    </thead>
+                    <tbody class="text-[11px] font-mono">
+                        <tr v-if="!logs.length">
+                            <td colspan="9" class="p-8 text-center text-gray-600">NO SIGNALS IN CURRENT MATRIX</td>
+                        </tr>
+                        <tr v-for="log in logs" :key="log._id"
+                            @click.self="openDeepScan(log)"
+                            class="border-b border-white/5 hover:bg-cyan-500/5 transition cursor-pointer group"
+                            :class="log.flags&&log.flags.includes('bot') ? 'opacity-40' : ''">
+                            <td class="p-2 text-gray-500" @click="openDeepScan(log)">{{formatDate(log.timestamp)}}</td>
+                            <td class="p-2 text-cyan-400 font-bold" @click="openDeepScan(log)">{{log.ip}}</td>
+                            <td class="p-2 text-gray-600 truncate max-w-[130px]" @click="openDeepScan(log)">{{log.isp}}</td>
+                            <td class="p-2 text-gray-300" @click="openDeepScan(log)">{{log.city}}, {{log.country}}</td>
+                            <td class="p-2" @click="openDeepScan(log)">
+                                <span class="text-pink-400">{{log.platform||'?'}}</span>
+                                <span class="text-gray-700"> | </span>
+                                <span class="text-gray-400">{{log.device||'?'}}</span>
+                            </td>
+                            <td class="p-2 text-yellow-200/70" @click="openDeepScan(log)">{{log.browser||'?'}}</td>
+                            <td class="p-2 text-cyan-300/70 italic truncate max-w-[120px]" @click="openDeepScan(log)">{{log.page}}</td>
+                            <td class="p-2">
+                                <span v-for="f in (log.flags||[])" :key="f"
+                                    class="text-[9px] px-1 py-0.5 mr-1 border rounded"
+                                    :class="f==='bot'?'border-red-500/50 text-red-400':'border-yellow-500/50 text-yellow-400'">
+                                    {{f}}
+                                </span>
+                            </td>
+                            <td class="p-2">
+                                <div class="flex gap-1">
+                                    <button @click.stop="blockIP(log.ip)" title="Block IP"
+                                        class="text-[9px] px-1.5 py-0.5 border border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/20 transition rounded">
+                                        BLK
+                                    </button>
+                                    <button @click.stop="deleteLog(log._id)" title="Delete entry"
+                                        class="text-[9px] px-1.5 py-0.5 border border-red-500/40 text-red-400 hover:bg-red-500/20 transition rounded">
+                                        DEL
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            <div class="border-t border-white/5 px-4 py-2 flex justify-between items-center text-xs">
+                <button @click="changePage(-1)" :disabled="pagination.page<=1"
+                    class="btn-cyber text-xs px-3 py-1 disabled:opacity-30">◀ PREV</button>
+                <span class="text-gray-600">
+                    Page <span class="text-cyan-400">{{pagination.page}}</span> of <span class="text-cyan-400">{{pagination.pages||1}}</span>
+                    &nbsp;·&nbsp; {{pagination.total}} records
+                </span>
+                <button @click="changePage(1)" :disabled="pagination.page>=pagination.pages"
+                    class="btn-cyber text-xs px-3 py-1 disabled:opacity-30">NEXT ▶</button>
+            </div>
+        </div>
+
+    </template>
+
+    <!-- ════════════════════════════════════════════════════════════════════════
+         TAB: BLOCKLIST
+    ════════════════════════════════════════════════════════════════════════ -->
+    <template v-if="activeTab==='blocklist'">
+        <div class="cyber-border p-4 mb-4 flex gap-3 items-end flex-wrap">
+            <div>
+                <div class="text-[10px] text-gray-500 mb-1 uppercase">IP Address</div>
+                <input v-model="blockForm.ip" type="text" placeholder="e.g. 1.2.3.4" class="text-xs w-48">
+            </div>
+            <div>
+                <div class="text-[10px] text-gray-500 mb-1 uppercase">Reason</div>
+                <input v-model="blockForm.reason" type="text" placeholder="Spam, bot, etc." class="text-xs w-64">
+            </div>
+            <button @click="addBlock" class="btn-cyber text-xs">+ BLOCK IP</button>
+        </div>
+
+        <div class="cyber-border flex-1 overflow-auto">
+            <table class="w-full text-left border-collapse">
+                <thead class="sticky top-0 bg-[#030305]">
+                    <tr class="text-[10px] text-gray-500 uppercase">
+                        <th class="p-3 border-b border-white/5">Blocked IP</th>
+                        <th class="p-3 border-b border-white/5">Reason</th>
+                        <th class="p-3 border-b border-white/5">Added</th>
+                        <th class="p-3 border-b border-white/5">Action</th>
+                    </tr>
+                </thead>
+                <tbody class="text-xs font-mono">
+                    <tr v-if="!blocklist.length">
+                        <td colspan="4" class="p-8 text-center text-gray-600">NO BLOCKED IPS</td>
+                    </tr>
+                    <tr v-for="b in blocklist" :key="b.ip" class="border-b border-white/5">
+                        <td class="p-3 text-red-400 font-bold">{{b.ip}}</td>
+                        <td class="p-3 text-gray-400">{{b.reason}}</td>
+                        <td class="p-3 text-gray-600">{{formatDate(b.createdAt)}}</td>
+                        <td class="p-3">
+                            <button @click="removeBlock(b.ip)"
+                                class="text-[10px] px-2 py-1 border border-green-500/40 text-green-400 hover:bg-green-500/20 transition">
+                                UNBLOCK
+                            </button>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </template>
+
+    <!-- Deep Scan Modal -->
+    <div v-if="selectedLog" class="modal-overlay" @click.self="selectedLog=null">
+        <div class="cyber-border modal-content p-6">
+            <div class="flex justify-between items-center mb-4 border-b border-pink-500/20 pb-3">
+                <h2 class="text-lg font-bold glow-pink uppercase text-pink-500">&gt; Deep Scan</h2>
+                <button @click="selectedLog=null" class="text-gray-500 hover:text-white text-2xl leading-none">&times;</button>
+            </div>
+            <div class="grid grid-cols-2 gap-3 text-xs font-mono mb-4">
+                <div><div class="field-label">TARGET_IP</div><span class="text-cyan-400 font-bold">{{selectedLog.ip}}</span></div>
+                <div><div class="field-label">TIMESTAMP</div><span class="text-gray-200">{{formatDate(selectedLog.timestamp)}}</span></div>
+                <div class="col-span-2"><div class="field-label">USER_AGENT</div><span class="text-gray-400 text-[10px] break-all">{{selectedLog.ua}}</span></div>
+                <div><div class="field-label">ISP</div><span class="text-gray-200">{{selectedLog.isp}}</span></div>
+                <div>
+                    <div class="field-label">LOCATION</div>
+                    <span class="text-gray-200">{{selectedLog.city}}, {{selectedLog.region}}, {{selectedLog.country}}</span>
+                    <a v-if="selectedLog.lat&&selectedLog.lon"
+                       :href="'https://www.google.com/maps/search/?api=1&query='+selectedLog.lat+','+selectedLog.lon"
+                       target="_blank" class="text-pink-400 ml-2 hover:underline text-[10px] blink">[MAP]</a>
+                </div>
+                <div><div class="field-label">DEVICE</div><span class="text-pink-400">{{selectedLog.device||'?'}}</span></div>
+                <div><div class="field-label">OS</div><span class="text-pink-400">{{selectedLog.platform||'?'}}</span></div>
+                <div><div class="field-label">BROWSER</div><span class="text-yellow-200/80">{{selectedLog.browser||'?'}}</span></div>
+                <div><div class="field-label">SCREEN</div><span class="text-cyan-400">{{selectedLog.screen}}</span></div>
+                <div><div class="field-label">PAGE</div><span class="text-cyan-400">{{selectedLog.page}}</span></div>
+                <div><div class="field-label">REFERRER</div><span class="text-gray-400">{{selectedLog.referrer||'—'}}</span></div>
+                <div><div class="field-label">SESSION_ID</div><span class="text-gray-600 text-[10px]">{{selectedLog.sessionId||'—'}}</span></div>
+                <div>
+                    <div class="field-label">FLAGS</div>
+                    <span v-if="!selectedLog.flags||!selectedLog.flags.length" class="text-gray-600">none</span>
+                    <span v-for="f in (selectedLog.flags||[])" :key="f"
+                        class="text-[10px] px-1 py-0.5 mr-1 border rounded"
+                        :class="f==='bot'?'border-red-500/50 text-red-400':'border-yellow-500/50 text-yellow-400'">{{f}}</span>
+                </div>
+            </div>
+            <div class="flex gap-2 justify-end">
+                <button @click="blockIP(selectedLog.ip); selectedLog=null" class="btn-cyber text-xs !border-yellow-500 !text-yellow-400">BLOCK IP</button>
+                <button @click="deleteLog(selectedLog._id); selectedLog=null" class="btn-cyber text-xs !border-red-500 !text-red-400">DELETE</button>
+                <button @click="selectedLog=null" class="btn-cyber text-xs">CLOSE</button>
+            </div>
+        </div>
+    </div>
+
+</div><!-- #app -->
+
+<script src="/assets/app.js"></script>
+</body>
+</html>
