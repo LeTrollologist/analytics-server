@@ -5,13 +5,12 @@ const cors = require('cors');
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(cors()); // Allow all origins so GitHub Pages can POST to /log
 
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("SYSTEM ONLINE: Neural Link Established"))
     .catch(err => console.error("CONNECTION CRITICAL ERROR:", err.message));
 
-// Enhanced Schema with Browser and Coordinates
 const LogSchema = new mongoose.Schema({
     timestamp: { type: Date, default: Date.now },
     ip: String,
@@ -37,18 +36,15 @@ function parseUA(ua) {
 
     if (!ua) return { device, platform, browser };
 
-    // Device Parse
     if (/mobile/i.test(ua)) device = "Mobile Unit";
     else if (/tablet/i.test(ua)) device = "Tablet Unit";
-    
-    // OS Parse
+
     if (/Windows/i.test(ua)) platform = "Windows Core";
     else if (/iPhone|iPad|iPod/i.test(ua)) platform = "iOS Node";
     else if (/Android/i.test(ua)) platform = "Android Mesh";
     else if (/Macintosh|Mac OS/i.test(ua)) platform = "MacOS Kernel";
     else if (/Linux/i.test(ua)) platform = "Linux System";
 
-    // Browser Parse
     if (/Edg/i.test(ua)) browser = "Edge";
     else if (/OPR|Opera/i.test(ua)) browser = "Opera";
     else if (/Chrome/i.test(ua)) browser = "Chrome";
@@ -59,17 +55,17 @@ function parseUA(ua) {
 }
 
 // ---------------------------------------------------------
-// 1. INGESTION ROUTE (Receives Data from GitHub Pages)
+// 1. INGESTION ROUTE — receives data from GitHub Pages
+//    URL: POST https://analytics-server-bdrm.onrender.com/log
 // ---------------------------------------------------------
 app.post('/log', async (req, res) => {
     try {
         const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
         const cleanIp = ip.split(',')[0].trim();
-        
-        let geo = {};
-        // Safety bypass for local development IPs
+
         const isLocal = cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp.startsWith('192.168.') || cleanIp.startsWith('10.');
-        
+
+        let geo = {};
         if (!isLocal) {
             const geoResponse = await axios.get(`http://ip-api.com/json/${cleanIp}`).catch(() => ({ data: {} }));
             geo = geoResponse.data;
@@ -97,21 +93,21 @@ app.post('/log', async (req, res) => {
 
         await newLog.save();
         res.status(200).send("DATA INGESTED");
-    } catch (err) { 
+    } catch (err) {
         console.error("Ingestion Error:", err);
-        res.status(500).send("NULL"); 
+        res.status(500).send("NULL");
     }
 });
 
 // ---------------------------------------------------------
-// 2. API TELEMETRY ROUTE (Feeds the Admin Dashboard)
+// 2. TELEMETRY ROUTE — feeds the admin dashboard
+//    URL: GET https://analytics-server-bdrm.onrender.com/api/telemetry?pw=...
 // ---------------------------------------------------------
 app.get('/api/telemetry', async (req, res) => {
     const secret = process.env.ADMIN_PW || "admin123";
     if (req.query.pw !== secret) return res.status(401).json({ error: "ACCESS DENIED" });
 
     try {
-        // Build Dynamic Filters based on Search & Dropdowns
         const match = {};
         if (req.query.search) {
             const regex = new RegExp(req.query.search, 'i');
@@ -121,130 +117,92 @@ app.get('/api/telemetry', async (req, res) => {
         if (req.query.platform && req.query.platform !== 'ALL') match.platform = req.query.platform;
         if (req.query.browser && req.query.browser !== 'ALL') match.browser = req.query.browser;
 
-        // Fetch Logs
         const logs = await Log.find(match).sort({ timestamp: -1 }).limit(100);
-        
-        // Advanced Aggregations using the active filters with $ifNull fallbacks for old documents
         const totalHits = await Log.countDocuments(match);
         const uniqueIPs = await Log.distinct('ip', match).then(ips => ips.length);
-        
-        const devices = await Log.aggregate([{ $match: match }, { $group: { _id: { $ifNull: ["$device", "Unknown"] }, count: { $sum: 1 } } }]);
+
+        const devices   = await Log.aggregate([{ $match: match }, { $group: { _id: { $ifNull: ["$device",   "Unknown"] }, count: { $sum: 1 } } }]);
         const platforms = await Log.aggregate([{ $match: match }, { $group: { _id: { $ifNull: ["$platform", "Unknown"] }, count: { $sum: 1 } } }]);
-        const browsers = await Log.aggregate([{ $match: match }, { $group: { _id: { $ifNull: ["$browser", "Unknown"] }, count: { $sum: 1 } } }]);
-        const locations = await Log.aggregate([{ $match: match }, { $group: { _id: { city: "$city", country: "$country" }, count: { $sum: 1 } } }, { $sort: { count: -1 } }, { $limit: 5 }]);
-        
-        // Timeline Data (Last 7 Days)
+        const browsers  = await Log.aggregate([{ $match: match }, { $group: { _id: { $ifNull: ["$browser",  "Unknown"] }, count: { $sum: 1 } } }]);
+        const locations = await Log.aggregate([
+            { $match: match },
+            { $group: { _id: { city: "$city", country: "$country" }, count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 5 }
+        ]);
+
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-        const timelineMatch = { ...match, timestamp: { $gte: sevenDaysAgo } };
-        
         const timeline = await Log.aggregate([
-            { $match: timelineMatch },
-            { $group: { 
-                _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, 
-                count: { $sum: 1 } 
-            }},
+            { $match: { ...match, timestamp: { $gte: sevenDaysAgo } } },
+            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, count: { $sum: 1 } } },
             { $sort: { "_id": 1 } }
         ]);
 
         res.json({ logs, stats: { totalHits, uniqueIPs, devices, platforms, browsers, locations, timeline } });
-    } catch (err) { res.status(500).json({ error: "SYSTEM CRASH" }); }
+    } catch (err) {
+        console.error("Telemetry Error:", err);
+        res.status(500).json({ error: "SYSTEM CRASH" });
+    }
 });
 
 // ---------------------------------------------------------
-// 3. SYSTEM HEALTH & STATUS RUNTIME
+// 3. HEALTH ROUTE — status indicators in the dashboard
+//    URL: GET https://analytics-server-bdrm.onrender.com/api/health
 // ---------------------------------------------------------
 app.get('/api/health', async (req, res) => {
-    // 1. Analytics & Database Status
     const status = {
-        analytics: 'ONLINE', 
+        analytics: 'ONLINE',
         database: mongoose.connection.readyState === 1 ? 'ONLINE' : 'OFFLINE',
         mainSite: 'OFFLINE',
         checkIns: 'OFFLINE'
     };
 
-    // 2. Ping Main Site (GitHub Pages)
     try {
         await axios.get('https://letrollologist.github.io/anya.github.io/index.html', { timeout: 5000 });
         status.mainSite = 'ONLINE';
-    } catch (e) {
-        status.mainSite = 'OFFLINE';
-    }
+    } catch (e) { /* stays OFFLINE */ }
 
-    // 3. Ping Check-ins Server (Ngrok)
     try {
-        const ngrokUrl = 'https://overdefensively-unabjective-eilene.ngrok-free.dev/';
-        await axios.head(ngrokUrl, { timeout: 5000 });
+        await axios.head('https://overdefensively-unabjective-eilene.ngrok-free.dev/', { timeout: 5000 });
         status.checkIns = 'ONLINE';
-    } catch (e) {
-        status.checkIns = 'OFFLINE';
-    }
+    } catch (e) { /* stays OFFLINE */ }
 
     res.json(status);
 });
 
 // ---------------------------------------------------------
-// 4. ADMIN DASHBOARD ROUTE (Serves the UI)
+// 4. ADMIN DASHBOARD — served at /admin?pw=...
+//    Loads external assets/app.js and assets/style.css
 // ---------------------------------------------------------
 app.get('/admin', (req, res) => {
     const secret = process.env.ADMIN_PW || "admin123";
     if (req.query.pw !== secret) return res.status(401).send("ACCESS DENIED");
 
-    res.send(`
-<!DOCTYPE html>
+    res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>SENTINEL // COMMAND_CENTER</title>
+    <script>
+        const originalWarn = console.warn;
+        console.warn = (...args) => { if (typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return; originalWarn(...args); };
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=JetBrains+Mono:wght@300;500;700&display=swap" rel="stylesheet">
-    <style>
-        :root { --neon-cyan: #00f3ff; --neon-pink: #ff00ff; --deep-bg: #030305; --dark-glass: rgba(10, 15, 20, 0.85); }
-        body { background: var(--deep-bg); color: #fff; font-family: 'JetBrains Mono', monospace; overflow-x: hidden; margin: 0; }
-        h1, h2, h3 { font-family: 'Orbitron', sans-serif; letter-spacing: 2px; }
-        
-        .cyber-border { border: 1px solid rgba(0, 243, 255, 0.3); background: var(--dark-glass); backdrop-filter: blur(10px); position: relative; }
-        .cyber-border::after { content: ''; position: absolute; top: -1px; left: -1px; width: 10px; height: 10px; border-top: 2px solid var(--neon-cyan); border-left: 2px solid var(--neon-cyan); }
-        .cyber-border::before { content: ''; position: absolute; bottom: -1px; right: -1px; width: 10px; height: 10px; border-bottom: 2px solid var(--neon-pink); border-right: 2px solid var(--neon-pink); }
-        
-        .glow-text { text-shadow: 0 0 10px var(--neon-cyan); }
-        .glow-pink { text-shadow: 0 0 10px var(--neon-pink); color: var(--neon-pink); }
-        
-        .scanline { position: fixed; inset: 0; background: linear-gradient(to bottom, transparent 50%, rgba(0, 243, 255, 0.02) 50%); background-size: 100% 4px; pointer-events: none; z-index: 999; }
-        .grid-bg { position: fixed; inset: 0; background-image: linear-gradient(rgba(0, 243, 255, 0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 243, 255, 0.05) 1px, transparent 1px); background-size: 40px 40px; z-index: -1; }
-        
-        input, select { background: rgba(0, 243, 255, 0.05); border: 1px solid var(--neon-cyan); color: var(--neon-cyan); padding: 8px 12px; font-family: 'JetBrains Mono'; outline: none; transition: 0.3s; }
-        input:focus, select:focus { box-shadow: 0 0 15px rgba(0, 243, 255, 0.4); }
-        input::placeholder { color: rgba(0, 243, 255, 0.3); }
-        
-        .btn-cyber { background: transparent; border: 1px solid var(--neon-pink); color: var(--neon-pink); padding: 8px 16px; cursor: pointer; text-transform: uppercase; font-weight: bold; transition: 0.3s; }
-        .btn-cyber:hover, .btn-cyber.active { background: rgba(255, 0, 255, 0.2); box-shadow: 0 0 15px rgba(255, 0, 255, 0.5); }
-        
-        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); z-index: 1000; display: flex; justify-content: center; align-items: center; }
-        .modal-content { width: 90%; max-width: 700px; }
-        
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: var(--deep-bg); }
-        ::-webkit-scrollbar-thumb { background: var(--neon-cyan); }
-        
-        .blink { animation: blinker 1s linear infinite; }
-        @keyframes blinker { 50% { opacity: 0; } }
-    </style>
+    <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
     <div class="scanline"></div>
     <div class="grid-bg"></div>
 
     <div id="app" class="p-4 md:p-8 max-w-[1800px] mx-auto min-h-screen flex flex-col">
-        <!-- HEADER -->
         <header class="flex flex-col md:flex-row justify-between items-end border-b border-cyan-500/50 pb-4 mb-6">
             <div>
                 <div class="flex items-center gap-4 mb-2">
                     <div class="text-[10px] text-cyan-400 opacity-70 uppercase font-bold tracking-widest">Orbital Monitoring Station // V2.0</div>
-                    
-                    <!-- HEALTH MATRIX LIVE STATUS -->
                     <div class="flex gap-3 text-[9px] uppercase font-bold border border-white/10 px-2 py-1 bg-black/50">
                         <div>DB: <span :class="health.database === 'ONLINE' ? 'text-green-400' : 'text-red-500 blink'">{{ health.database }}</span></div>
                         <div>SITE: <span :class="health.mainSite === 'ONLINE' ? 'text-green-400' : 'text-red-500 blink'">{{ health.mainSite }}</span></div>
@@ -271,7 +229,6 @@ app.get('/admin', (req, res) => {
             </div>
         </header>
 
-        <!-- CONTROL MATRIX (FILTERS) -->
         <div class="cyber-border p-4 mb-6 flex flex-wrap gap-4 items-center">
             <div class="text-cyan-400 font-bold uppercase tracking-widest text-sm mr-4">> FILTER_MATRIX:</div>
             <input v-model="filters.search" @input="debouncedFetch" type="text" placeholder="Search IP, ISP, City..." class="flex-1 min-w-[200px] text-sm">
@@ -299,7 +256,6 @@ app.get('/admin', (req, res) => {
             <button @click="exportCSV" class="btn-cyber text-sm !border-cyan-400 !text-cyan-400 hover:!bg-cyan-500/20">DOWNLOAD CSV</button>
         </div>
 
-        <!-- DATAVIZ GRID -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
             <div class="cyber-border p-4">
                 <h3 class="text-xs text-cyan-400 mb-4 uppercase font-bold tracking-widest">Temporal Activity (7D)</h3>
@@ -328,7 +284,6 @@ app.get('/admin', (req, res) => {
             </div>
         </div>
 
-        <!-- LIVE DATA FEED -->
         <div class="cyber-border flex-1 flex flex-col overflow-hidden min-h-[400px]">
             <div class="bg-cyan-500/10 p-3 border-b border-cyan-500/30 flex justify-between items-center">
                 <h2 class="text-sm font-bold uppercase tracking-widest text-cyan-400">Intercepted Signal Log (Latest 100)</h2>
@@ -357,7 +312,9 @@ app.get('/admin', (req, res) => {
                             <td class="p-3 text-gray-500 truncate max-w-[150px]">{{ log.isp }}</td>
                             <td class="p-3 text-gray-300">{{ log.city }}, {{ log.country }}</td>
                             <td class="p-3">
-                                <span class="text-pink-400">{{ log.platform || 'Unknown' }}</span> <span class="text-gray-600">|</span> <span class="text-gray-400">{{ log.device || 'Unknown' }}</span>
+                                <span class="text-pink-400">{{ log.platform || 'Unknown' }}</span>
+                                <span class="text-gray-600"> | </span>
+                                <span class="text-gray-400">{{ log.device || 'Unknown' }}</span>
                             </td>
                             <td class="p-3 text-yellow-200/70">{{ log.browser || 'Unknown' }}</td>
                             <td class="p-3 text-cyan-300 italic">{{ log.page }}</td>
@@ -367,20 +324,16 @@ app.get('/admin', (req, res) => {
             </div>
         </div>
 
-        <!-- DEEP SCAN MODAL -->
         <div v-if="selectedLog" class="modal-overlay" @click.self="selectedLog = null">
             <div class="cyber-border modal-content p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-6 border-b border-pink-500/30 pb-2">
                     <h2 class="text-xl font-bold glow-pink uppercase text-pink-500">> DEEP SCAN RESULTS</h2>
                     <button @click="selectedLog = null" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
                 </div>
-                
                 <div class="grid grid-cols-2 gap-4 text-sm font-mono mb-6">
                     <div><span class="text-gray-500 block text-[10px]">TARGET_IP</span><span class="text-cyan-400 font-bold">{{ selectedLog.ip }}</span></div>
                     <div><span class="text-gray-500 block text-[10px]">TIMESTAMP</span><span class="text-gray-200">{{ formatDate(selectedLog.timestamp) }}</span></div>
-                    
                     <div class="col-span-2"><span class="text-gray-500 block text-[10px]">RAW_USER_AGENT</span><span class="text-gray-400 text-[10px] break-all">{{ selectedLog.ua }}</span></div>
-                    
                     <div><span class="text-gray-500 block text-[10px]">ISP / ROUTER</span><span class="text-gray-200">{{ selectedLog.isp }}</span></div>
                     <div>
                         <span class="text-gray-500 block text-[10px]">COORDINATES</span>
@@ -389,16 +342,12 @@ app.get('/admin', (req, res) => {
                             <a v-if="selectedLog.lat && selectedLog.lon" :href="'https://www.google.com/maps/search/?api=1&query=' + selectedLog.lat + ',' + selectedLog.lon" target="_blank" class="text-pink-400 ml-2 hover:underline text-[10px] blink">[MAP_LINK]</a>
                         </span>
                     </div>
-                    
                     <div><span class="text-gray-500 block text-[10px]">HARDWARE_NODE</span><span class="text-pink-400">{{ selectedLog.device || 'Unknown' }}</span></div>
                     <div><span class="text-gray-500 block text-[10px]">OS_KERNEL</span><span class="text-pink-400">{{ selectedLog.platform || 'Unknown' }}</span></div>
-                    
                     <div><span class="text-gray-500 block text-[10px]">BROWSER_ENGINE</span><span class="text-yellow-200/70">{{ selectedLog.browser || 'Unknown' }}</span></div>
                     <div><span class="text-gray-500 block text-[10px]">VIEWPORT_RES</span><span class="text-cyan-400">{{ selectedLog.screen }}</span></div>
-                    
                     <div class="col-span-2"><span class="text-gray-500 block text-[10px]">ACTIVE_PAGE</span><span class="text-cyan-400">{{ selectedLog.page }}</span></div>
                 </div>
-                
                 <div class="flex justify-end">
                     <button @click="selectedLog = null" class="btn-cyber">TERMINATE CONNECTION</button>
                 </div>
@@ -406,166 +355,14 @@ app.get('/admin', (req, res) => {
         </div>
     </div>
 
-    <script>
-        const { createApp } = Vue;
-        // The PW is automatically injected from the URL query string
-        const API_PW = new URLSearchParams(window.location.search).get('pw');
-
-        createApp({
-            data() {
-                return {
-                    logs:[],
-                    stats: { totalHits: 0, uniqueIPs: 0, devices: [], platforms:[], browsers:[], locations: [], timeline:[] },
-                    filters: { search: '', device: 'ALL', platform: 'ALL', browser: 'ALL' },
-                    health: { database: 'SCANNING', mainSite: 'SCANNING', checkIns: 'SCANNING' },
-                    isLive: true,
-                    loading: false,
-                    pollInterval: null,
-                    healthInterval: null,
-                    selectedLog: null,
-                    charts: {}
-                }
-            },
-            methods: {
-                async fetchHealth() {
-                    try {
-                        const res = await fetch('/api/health');
-                        if(res.ok) this.health = await res.json();
-                    } catch (e) {
-                        this.health = { database: 'OFFLINE', mainSite: 'OFFLINE', checkIns: 'OFFLINE' };
-                    }
-                },
-                async fetchData() {
-                    this.loading = true;
-                    try {
-                        const params = new URLSearchParams({ pw: API_PW, ...this.filters });
-                        const res = await fetch('/api/telemetry?' + params.toString());
-                        const data = await res.json();
-                        if(data.error) { alert(data.error); return; }
-                        
-                        this.logs = data.logs;
-                        this.stats = data.stats;
-                        this.updateCharts();
-                    } catch (e) {
-                        console.error("Uplink failed");
-                    }
-                    this.loading = false;
-                },
-                debouncedFetch() {
-                    clearTimeout(this.timeout);
-                    this.timeout = setTimeout(() => { this.fetchData(); }, 500);
-                },
-                resetFilters() {
-                    this.filters = { search: '', device: 'ALL', platform: 'ALL', browser: 'ALL' };
-                    this.fetchData();
-                },
-                exportCSV() {
-                    if (this.logs.length === 0) return;
-                    const headers =['Time', 'Target_IP', 'City', 'Country', 'ISP', 'Hardware', 'OS', 'Browser', 'Page'];
-                    const rows = this.logs.map(l =>[
-                        new Date(l.timestamp).toISOString(),
-                        l.ip, l.city, l.country, l.isp, l.device, l.platform, l.browser, l.page
-                    ].map(v => \`"\${(v||'').toString().replace(/"/g, '""')}"\`).join(','));
-                    
-                    const csvContent =[headers.join(','), ...rows].join('\\n');
-                    const blob = new Blob([csvContent], { type: 'text/csv' });
-                    const url = URL.createObjectURL(blob);
-                    
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = \`sentinel_intercepts_\${new Date().getTime()}.csv\`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                },
-                toggleLive() {
-                    this.isLive = !this.isLive;
-                    if (this.isLive) this.startPolling();
-                    else clearInterval(this.pollInterval);
-                },
-                startPolling() {
-                    clearInterval(this.pollInterval);
-                    this.pollInterval = setInterval(() => { if (!this.loading) this.fetchData(); }, 5000);
-                },
-                openDeepScan(log) {
-                    this.selectedLog = log;
-                },
-                formatDate(dateStr) {
-                    const d = new Date(dateStr);
-                    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour12:false});
-                },
-                initCharts() {
-                    Chart.defaults.color = '#666';
-                    Chart.defaults.font.family = "'JetBrains Mono', monospace";
-                    
-                    const tlCtx = document.getElementById('timelineChart').getContext('2d');
-                    this.charts.timeline = new Chart(tlCtx, {
-                        type: 'line',
-                        data: { labels: [], datasets: [{ label: 'Signals', data: [], borderColor: '#00f3ff', backgroundColor: 'rgba(0, 243, 255, 0.1)', borderWidth: 2, fill: true, tension: 0.3 }] },
-                        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }, x: { grid: { display: false } } } }
-                    });
-
-                    const devCtx = document.getElementById('deviceChart').getContext('2d');
-                    this.charts.device = new Chart(devCtx, {
-                        type: 'doughnut',
-                        data: { labels: [], datasets: [{ data: [], backgroundColor:['#ff00ff', '#00f3ff', '#3b82f6'], borderWidth: 0 }] },
-                        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, cutout: '70%' }
-                    });
-
-                    const platCtx = document.getElementById('platformChart').getContext('2d');
-                    this.charts.platform = new Chart(platCtx, {
-                        type: 'doughnut',
-                        data: { labels: [], datasets: [{ data: [], backgroundColor:['#00f3ff', '#ff00ff', '#8b5cf6', '#10b981', '#f59e0b'], borderWidth: 0 }] },
-                        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, cutout: '70%' }
-                    });
-                    
-                    const broCtx = document.getElementById('browserChart').getContext('2d');
-                    this.charts.browser = new Chart(broCtx, {
-                        type: 'doughnut',
-                        data: { labels: [], datasets: [{ data: [], backgroundColor:['#fcd34d', '#f43f5e', '#3b82f6', '#10b981', '#a855f7', '#64748b'], borderWidth: 0 }] },
-                        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, cutout: '70%' }
-                    });
-                },
-                updateCharts() {
-                    if(!this.charts.timeline) return;
-                    
-                    // Timeline
-                    this.charts.timeline.data.labels = this.stats.timeline.map(t => t._id.substring(5)); // Show MM-DD
-                    this.charts.timeline.data.datasets[0].data = this.stats.timeline.map(t => t.count);
-                    this.charts.timeline.update();
-
-                    // Devices
-                    this.charts.device.data.labels = this.stats.devices.map(d => d._id);
-                    this.charts.device.data.datasets[0].data = this.stats.devices.map(d => d.count);
-                    this.charts.device.update();
-
-                    // Platforms
-                    this.charts.platform.data.labels = this.stats.platforms.map(p => p._id);
-                    this.charts.platform.data.datasets[0].data = this.stats.platforms.map(p => p.count);
-                    this.charts.platform.update();
-                    
-                    // Browsers
-                    this.charts.browser.data.labels = this.stats.browsers.map(b => b._id);
-                    this.charts.browser.data.datasets[0].data = this.stats.browsers.map(b => b.count);
-                    this.charts.browser.update();
-                }
-            },
-            mounted() {
-                this.initCharts();
-                this.fetchHealth();
-                this.fetchData();
-                this.startPolling();
-                this.healthInterval = setInterval(() => this.fetchHealth(), 30000); // Check health every 30s
-            },
-            unmounted() {
-                clearInterval(this.pollInterval);
-                clearInterval(this.healthInterval);
-            }
-        }).mount('#app');
-    </script>
+    <script src="/assets/app.js"><\/script>
 </body>
-</html>
-    `);
+</html>`);
 });
+
+// Serve static assets (app.js, style.css) from /assets folder
+const path = require('path');
+app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('SENTINEL ONLINE - Port:', PORT));
