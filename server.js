@@ -257,21 +257,60 @@ app.get('/admin', (req, res) => {
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+
+            <!-- TEMPORAL ACTIVITY: bar chart via Chart.js -->
             <div class="cyber-border p-4">
                 <h3 class="text-xs text-cyan-400 mb-4 uppercase font-bold tracking-widest">Temporal Activity (7D)</h3>
                 <div class="h-[150px]"><canvas id="timelineChart"></canvas></div>
             </div>
-            <div class="cyber-border p-4 flex flex-col">
-                <h3 class="text-xs text-cyan-400 mb-4 uppercase font-bold tracking-widest">Hardware / OS Setup</h3>
-                <div class="flex-1 flex justify-center items-center h-[150px]">
-                    <div class="w-1/2 h-full"><canvas id="deviceChart"></canvas></div>
-                    <div class="w-1/2 h-full"><canvas id="platformChart"></canvas></div>
+
+            <!-- HARDWARE / OS: Vue-rendered stat bars, no canvas -->
+            <div class="cyber-border p-4">
+                <h3 class="text-xs text-cyan-400 mb-3 uppercase font-bold tracking-widest">Hardware / OS Setup</h3>
+                <div class="mb-3">
+                    <div class="text-[9px] text-gray-600 uppercase mb-1 tracking-widest">Device</div>
+                    <div v-if="hardwareRows.length === 0" class="text-[10px] text-gray-600">NO DATA</div>
+                    <div v-for="(row, i) in hardwareRows" :key="row.label" class="mb-2">
+                        <div class="flex justify-between text-[10px] mb-1">
+                            <span class="text-gray-300 truncate max-w-[120px]">{{ row.label }}</span>
+                            <span class="font-bold" :style="{ color: barColor(i) }">{{ row.count }}</span>
+                        </div>
+                        <div class="h-[3px] bg-white/5 rounded">
+                            <div class="h-full rounded transition-all duration-500" :style="{ width: row.pct + '%', background: barColor(i) }"></div>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="text-[9px] text-gray-600 uppercase mb-1 tracking-widest">OS</div>
+                    <div v-if="platformRows.length === 0" class="text-[10px] text-gray-600">NO DATA</div>
+                    <div v-for="(row, i) in platformRows" :key="row.label" class="mb-2">
+                        <div class="flex justify-between text-[10px] mb-1">
+                            <span class="text-gray-300 truncate max-w-[120px]">{{ row.label }}</span>
+                            <span class="font-bold" :style="{ color: barColor(i + 2) }">{{ row.count }}</span>
+                        </div>
+                        <div class="h-[3px] bg-white/5 rounded">
+                            <div class="h-full rounded transition-all duration-500" :style="{ width: row.pct + '%', background: barColor(i + 2) }"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
+
+            <!-- BROWSER ENGINES: Vue-rendered stat bars, no canvas -->
             <div class="cyber-border p-4">
-                <h3 class="text-xs text-cyan-400 mb-4 uppercase font-bold tracking-widest">Browser Engines</h3>
-                <div class="h-[150px]"><canvas id="browserChart"></canvas></div>
+                <h3 class="text-xs text-cyan-400 mb-3 uppercase font-bold tracking-widest">Browser Engines</h3>
+                <div v-if="browserRows.length === 0" class="text-[10px] text-gray-600 mt-2">NO DATA</div>
+                <div v-for="(row, i) in browserRows" :key="row.label" class="mb-3">
+                    <div class="flex justify-between text-[10px] mb-1">
+                        <span class="text-gray-300">{{ row.label }}</span>
+                        <span class="font-bold" :style="{ color: barColor(i) }">{{ row.count }} <span class="text-gray-600">({{ row.pct }}%)</span></span>
+                    </div>
+                    <div class="h-[4px] bg-white/5 rounded">
+                        <div class="h-full rounded transition-all duration-500" :style="{ width: row.pct + '%', background: barColor(i) }"></div>
+                    </div>
+                </div>
             </div>
+
+            <!-- TOP SECTORS: unchanged -->
             <div class="cyber-border p-4">
                 <h3 class="text-xs text-pink-500 glow-pink mb-4 uppercase font-bold tracking-widest">Top Sectors</h3>
                 <div class="space-y-3">
@@ -282,6 +321,7 @@ app.get('/admin', (req, res) => {
                     </div>
                 </div>
             </div>
+
         </div>
 
         <div class="cyber-border flex-1 flex flex-col overflow-hidden min-h-[400px]">
