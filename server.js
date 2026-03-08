@@ -9,9 +9,19 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '10kb' }));
 
-// ── CORS: GitHub Pages origin allowed for log + health ───────────────────────
-const ghCors  = cors({ origin: 'https://letrollologist.github.io' });
-const logCors = ghCors;
+// ── CORS ──────────────────────────────────────────────────────────────────────
+// Shared options — allow the GitHub Pages origin for /log and /api/health
+const corsOptions = {
+    origin: 'https://letrollologist.github.io',
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type']
+};
+const ghCors = cors(corsOptions);
+
+// Handle OPTIONS preflight globally for every route.
+// Without this, the browser's preflight request gets no
+// Access-Control-Allow-Origin header and blocks the real request.
+app.options('*', cors(corsOptions));
 
 // ── Rate limiters ─────────────────────────────────────────────────────────────
 const logLimiter = rateLimit({
@@ -52,22 +62,22 @@ const Block = mongoose.model('Block', BlockSchema);
 function parseUA(ua) {
     let device = 'Desktop Station', platform = 'Unknown OS', browser = 'Unknown Browser';
     if (!ua) return { device, platform, browser };
-    if (/mobile/i.test(ua))  device = 'Mobile Unit';
+    if (/mobile/i.test(ua))      device = 'Mobile Unit';
     else if (/tablet/i.test(ua)) device = 'Tablet Unit';
-    if      (/Windows/i.test(ua))            platform = 'Windows Core';
-    else if (/iPhone|iPad|iPod/i.test(ua))   platform = 'iOS Node';
-    else if (/Android/i.test(ua))            platform = 'Android Mesh';
-    else if (/Macintosh|Mac OS/i.test(ua))   platform = 'MacOS Kernel';
-    else if (/Linux/i.test(ua))              platform = 'Linux System';
-    if      (/Edg/i.test(ua))               browser = 'Edge';
-    else if (/OPR|Opera/i.test(ua))         browser = 'Opera';
-    else if (/Chrome/i.test(ua))            browser = 'Chrome';
-    else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = 'Safari';
-    else if (/Firefox/i.test(ua))           browser = 'Firefox';
+    if      (/Windows/i.test(ua))                        platform = 'Windows Core';
+    else if (/iPhone|iPad|iPod/i.test(ua))               platform = 'iOS Node';
+    else if (/Android/i.test(ua))                        platform = 'Android Mesh';
+    else if (/Macintosh|Mac OS/i.test(ua))               platform = 'MacOS Kernel';
+    else if (/Linux/i.test(ua))                          platform = 'Linux System';
+    if      (/Edg/i.test(ua))                            browser  = 'Edge';
+    else if (/OPR|Opera/i.test(ua))                      browser  = 'Opera';
+    else if (/Chrome/i.test(ua))                         browser  = 'Chrome';
+    else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser  = 'Safari';
+    else if (/Firefox/i.test(ua))                        browser  = 'Firefox';
     return { device, platform, browser };
 }
 
-function detectFlags(ua, ip) {
+function detectFlags(ua) {
     const flags = [];
     if (!ua || /bot|crawl|spider|slurp|curl|wget|python|java|go-http/i.test(ua)) flags.push('bot');
     return flags;
@@ -95,9 +105,9 @@ if (SELF_URL) {
 // ROUTE 1 — Ingest visitor hit
 // POST /log
 // =============================================================================
-app.post('/log', logCors, logLimiter, async (req, res) => {
+app.post('/log', ghCors, logLimiter, async (req, res) => {
     try {
-        const raw   = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+        const raw     = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
         const cleanIp = raw.split(',')[0].trim();
         const isLocal = ['127.0.0.1','::1'].includes(cleanIp)
             || cleanIp.startsWith('192.168.') || cleanIp.startsWith('10.');
@@ -107,24 +117,28 @@ app.post('/log', logCors, logLimiter, async (req, res) => {
 
         let geo = {};
         if (!isLocal) {
-            const g = await axios.get(`http://ip-api.com/json/${cleanIp}?fields=status,city,regionName,country,isp,lat,lon,proxy,hosting`, { timeout: 4000 }).catch(() => ({ data: {} }));
+            const g = await axios.get(
+                `http://ip-api.com/json/${cleanIp}?fields=status,city,regionName,country,isp,lat,lon,proxy,hosting`,
+                { timeout: 4000 }
+            ).catch(() => ({ data: {} }));
             geo = g.data || {};
         } else {
             geo = { city: 'Localhost', regionName: 'LAN', country: 'Internal', isp: 'Local', lat: 0, lon: 0 };
         }
 
-        const ua    = (req.body.ua || '').slice(0, 500);
+        const ua     = (req.body.ua || '').slice(0, 500);
         const uaInfo = parseUA(ua);
-        const flags  = detectFlags(ua, cleanIp);
+        const flags  = detectFlags(ua);
         if (geo.proxy || geo.hosting) flags.push('vpn/proxy');
 
         await Log.create({
-            ip: cleanIp,
+            ip:      cleanIp,
             city:    geo.city       || 'Void',
             region:  geo.regionName || 'Void',
             country: geo.country    || 'Void',
             isp:     geo.isp        || 'Dark Web',
-            lat: geo.lat || null, lon: geo.lon || null,
+            lat: geo.lat || null,
+            lon: geo.lon || null,
             ua, ...uaInfo,
             page:      (req.body.page      || 'Root').slice(0, 200),
             screen:    (req.body.screen    || 'Unknown').slice(0, 30),
@@ -165,14 +179,20 @@ app.get('/api/telemetry', adminLimiter, requireAuth, async (req, res) => {
             if (req.query.dateTo)   match.timestamp.$lte = new Date(req.query.dateTo + 'T23:59:59Z');
         }
 
-        const page  = Math.max(1, parseInt(req.query.page) || 1);
+        const page  = Math.max(1, parseInt(req.query.page)  || 1);
         const limit = Math.min(200, parseInt(req.query.limit) || 100);
         const skip  = (page - 1) * limit;
 
-        const sortField = ['timestamp','ip','city','country','browser'].includes(req.query.sort) ? req.query.sort : 'timestamp';
-        const sortDir   = req.query.sortDir === 'asc' ? 1 : -1;
+        const sortField = ['timestamp','ip','city','country','browser'].includes(req.query.sort)
+            ? req.query.sort : 'timestamp';
+        const sortDir = req.query.sortDir === 'asc' ? 1 : -1;
 
-        const [logs, totalHits, uniqueIPsArr, devices, platforms, browsers, locations, pages, timeline, todayCount, yesterdayCount, botCount] = await Promise.all([
+        const [
+            logs, totalHits, uniqueIPsArr,
+            devices, platforms, browsers,
+            locations, pages, timeline,
+            todayCount, yesterdayCount, botCount
+        ] = await Promise.all([
             Log.find(match).sort({ [sortField]: sortDir }).skip(skip).limit(limit).lean(),
             Log.countDocuments(match),
             Log.distinct('ip', match),
@@ -275,7 +295,7 @@ app.get('/api/health', ghCors, async (req, res) => {
 // =============================================================================
 app.get('/admin', adminLimiter, (req, res) => {
     const secret = process.env.ADMIN_PW;
-    if (!secret)            return res.status(500).send('SERVER MISCONFIGURED');
+    if (!secret)                 return res.status(500).send('SERVER MISCONFIGURED');
     if (req.query.pw !== secret) return res.status(401).send('ACCESS DENIED');
     res.sendFile(path.join(__dirname, 'assets', 'admin.html'));
 });
