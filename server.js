@@ -9,8 +9,9 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '10kb' }));
 
-// ── CORS: only GitHub Pages may POST to /log ─────────────────────────────────
-const logCors = cors({ origin: 'https://letrollologist.github.io' });
+// ── CORS: GitHub Pages origin allowed for log + health ───────────────────────
+const ghCors  = cors({ origin: 'https://letrollologist.github.io' });
+const logCors = ghCors;
 
 // ── Rate limiters ─────────────────────────────────────────────────────────────
 const logLimiter = rateLimit({
@@ -36,11 +37,10 @@ const LogSchema = new mongoose.Schema({
     page: String, screen: String,
     referrer: String,
     sessionId: String,
-    flags: { type: [String], default: [] }   // e.g. ['bot', 'vpn']
+    flags: { type: [String], default: [] }
 });
 const Log = mongoose.model('Log', LogSchema);
 
-// Blocklist — IPs that should be silently dropped from /log
 const BlockSchema = new mongoose.Schema({
     ip:        { type: String, unique: true },
     reason:    String,
@@ -67,14 +67,12 @@ function parseUA(ua) {
     return { device, platform, browser };
 }
 
-// Simple bot detection heuristic
 function detectFlags(ua, ip) {
     const flags = [];
     if (!ua || /bot|crawl|spider|slurp|curl|wget|python|java|go-http/i.test(ua)) flags.push('bot');
     return flags;
 }
 
-// Auth middleware
 function requireAuth(req, res, next) {
     const secret = process.env.ADMIN_PW;
     if (!secret) return res.status(500).json({ error: 'SERVER MISCONFIGURED' });
@@ -82,7 +80,7 @@ function requireAuth(req, res, next) {
     next();
 }
 
-// ── Keep-alive self-ping (prevents Render free tier spin-down) ─────────────────
+// ── Keep-alive self-ping ───────────────────────────────────────────────────────
 const SELF_URL = process.env.RENDER_EXTERNAL_URL
     ? `${process.env.RENDER_EXTERNAL_URL}/api/health`
     : null;
@@ -104,7 +102,6 @@ app.post('/log', logCors, logLimiter, async (req, res) => {
         const isLocal = ['127.0.0.1','::1'].includes(cleanIp)
             || cleanIp.startsWith('192.168.') || cleanIp.startsWith('10.');
 
-        // Drop blocked IPs silently
         const blocked = await Block.findOne({ ip: cleanIp });
         if (blocked) return res.status(200).send('OK');
 
@@ -149,7 +146,6 @@ app.post('/log', logCors, logLimiter, async (req, res) => {
 // =============================================================================
 app.get('/api/telemetry', adminLimiter, requireAuth, async (req, res) => {
     try {
-        // Build match query
         const match = {};
 
         if (req.query.search) {
@@ -163,23 +159,19 @@ app.get('/api/telemetry', adminLimiter, requireAuth, async (req, res) => {
         if (req.query.country  && req.query.country  !== 'ALL') match.country  = req.query.country;
         if (req.query.flag     && req.query.flag     !== 'ALL') match.flags    = req.query.flag;
 
-        // Date range
         if (req.query.dateFrom || req.query.dateTo) {
             match.timestamp = {};
             if (req.query.dateFrom) match.timestamp.$gte = new Date(req.query.dateFrom);
             if (req.query.dateTo)   match.timestamp.$lte = new Date(req.query.dateTo + 'T23:59:59Z');
         }
 
-        // Pagination
         const page  = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(200, parseInt(req.query.limit) || 100);
         const skip  = (page - 1) * limit;
 
-        // Sort
         const sortField = ['timestamp','ip','city','country','browser'].includes(req.query.sort) ? req.query.sort : 'timestamp';
         const sortDir   = req.query.sortDir === 'asc' ? 1 : -1;
 
-        // Run all queries in parallel
         const [logs, totalHits, uniqueIPsArr, devices, platforms, browsers, locations, pages, timeline, todayCount, yesterdayCount, botCount] = await Promise.all([
             Log.find(match).sort({ [sortField]: sortDir }).skip(skip).limit(limit).lean(),
             Log.countDocuments(match),
@@ -194,14 +186,11 @@ app.get('/api/telemetry', adminLimiter, requireAuth, async (req, res) => {
                 { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } }, count: { $sum: 1 } } },
                 { $sort: { _id: 1 } }
             ]),
-            // Today count
             Log.countDocuments({ ...match, timestamp: { $gte: new Date(new Date().setHours(0,0,0,0)) } }),
-            // Yesterday count
             Log.countDocuments({ ...match, timestamp: {
                 $gte: new Date(new Date().setHours(0,0,0,0) - 86400000),
                 $lt:  new Date(new Date().setHours(0,0,0,0))
             }}),
-            // Bot count
             Log.countDocuments({ ...match, flags: 'bot' })
         ]);
 
@@ -235,9 +224,6 @@ app.delete('/api/logs/:id', adminLimiter, requireAuth, async (req, res) => {
 
 // =============================================================================
 // ROUTE 4 — Blocklist management
-// GET  /api/blocklist        — list all blocked IPs
-// POST /api/blocklist        — add IP to blocklist
-// DELETE /api/blocklist/:ip  — remove IP from blocklist
 // =============================================================================
 app.get('/api/blocklist', adminLimiter, requireAuth, async (req, res) => {
     const list = await Block.find().sort({ createdAt: -1 }).lean();
@@ -269,7 +255,7 @@ app.delete('/api/blocklist/:ip', adminLimiter, requireAuth, async (req, res) => 
 // ROUTE 5 — Health check
 // GET /api/health
 // =============================================================================
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', ghCors, async (req, res) => {
     const status = {
         analytics: 'ONLINE',
         database:  mongoose.connection.readyState === 1 ? 'ONLINE' : 'OFFLINE',
@@ -294,7 +280,6 @@ app.get('/admin', adminLimiter, (req, res) => {
     res.sendFile(path.join(__dirname, 'assets', 'admin.html'));
 });
 
-// Static assets
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 const PORT = process.env.PORT || 10000;
