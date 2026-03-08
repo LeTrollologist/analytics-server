@@ -32,15 +32,9 @@ createApp({
     },
 
     computed: {
-        hardwareRows() {
-            return this._pctRows(this.stats.devices || []);
-        },
-        platformRows() {
-            return this._pctRows(this.stats.platforms || []);
-        },
-        browserRows() {
-            return this._pctRows(this.stats.browsers || []);
-        }
+        hardwareRows() { return this._pctRows(this.stats.devices  || []); },
+        platformRows() { return this._pctRows(this.stats.platforms || []); },
+        browserRows()  { return this._pctRows(this.stats.browsers  || []); }
     },
 
     methods: {
@@ -102,11 +96,11 @@ createApp({
             this.loading = true;
             try {
                 const p = new URLSearchParams({
-                    pw:       API_PW,
-                    page:     this.pagination.page,
-                    limit:    this.pagination.limit,
-                    sort:     this.sort.field,
-                    sortDir:  this.sort.dir,
+                    pw:      API_PW,
+                    page:    this.pagination.page,
+                    limit:   this.pagination.limit,
+                    sort:    this.sort.field,
+                    sortDir: this.sort.dir,
                     ...this.filters
                 });
                 const r = await fetch('/api/telemetry?' + p);
@@ -129,6 +123,8 @@ createApp({
                     pages:          data.stats?.pages          ?? [],
                     timeline:       data.stats?.timeline       ?? []
                 };
+                // Update the chart with fresh data — do NOT re-init here,
+                // only update the existing instance to avoid the fullSize crash.
                 this.updateTimeline();
             } catch (e) {
                 console.error('Uplink failed:', e.message);
@@ -234,18 +230,22 @@ createApp({
         openDeepScan(log) { this.selectedLog = log; },
 
         // ── Chart ─────────────────────────────────────────────────────────────
+        // Always destroy the old instance before creating a new one.
+        // Chart.js throws "Cannot set properties of undefined (setting 'fullSize')"
+        // when you try to attach a second chart to a canvas that already has one,
+        // which then cascades into an infinite retry loop (call stack overflow).
         initTimeline() {
-            Chart.defaults.color = '#444';
-            Chart.defaults.font.family = "'JetBrains Mono', monospace";
             const canvas = document.getElementById('timelineChart');
-            if (!canvas) return;
-            // Destroy any existing instance before creating a new one to
-            // prevent the "Cannot set properties of undefined (setting 'fullSize')"
-            // crash and the call-stack overflow it causes.
+            if (!canvas) return; // not in DOM yet (wrong tab), bail silently
+
             if (this.charts.timeline) {
                 this.charts.timeline.destroy();
                 this.charts.timeline = null;
             }
+
+            Chart.defaults.color = '#444';
+            Chart.defaults.font.family = "'JetBrains Mono', monospace";
+
             this.charts.timeline = new Chart(canvas.getContext('2d'), {
                 type: 'bar',
                 data: {
@@ -264,22 +264,28 @@ createApp({
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false } },
                     scales: {
-                        y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { maxTicksLimit: 5 }, beginAtZero: true },
+                        y: {
+                            grid: { color: 'rgba(255,255,255,0.04)' },
+                            ticks: { maxTicksLimit: 5 },
+                            beginAtZero: true
+                        },
                         x: { grid: { display: false } }
                     }
                 }
             });
         },
 
+        // Only update data — never re-init from here.
+        // If the chart doesn't exist (not yet created or canvas was absent),
+        // attempt one init and then return.
         updateTimeline() {
-            // If the chart doesn't exist yet (e.g. first load), initialise it first.
             if (!this.charts.timeline) {
                 this.initTimeline();
-                if (!this.charts.timeline) return;
+                if (!this.charts.timeline) return; // canvas still not in DOM
             }
             const tl = this.stats.timeline || [];
-            this.charts.timeline.data.labels             = tl.map(t => t._id.slice(5));
-            this.charts.timeline.data.datasets[0].data   = tl.map(t => t.count);
+            this.charts.timeline.data.labels           = tl.map(t => t._id.slice(5));
+            this.charts.timeline.data.datasets[0].data = tl.map(t => t.count);
             this.charts.timeline.update('none');
         }
     },
@@ -287,8 +293,8 @@ createApp({
     watch: {
         activeTab(tab) {
             if (tab === 'blocklist') this.fetchBlocklist();
-            // Re-initialise the chart when switching back to dashboard so the
-            // canvas is guaranteed to exist in the DOM before we draw to it.
+            // When switching back to dashboard, wait for Vue to render the
+            // canvas into the DOM, then re-init the chart cleanly.
             if (tab === 'dashboard') {
                 this.$nextTick(() => {
                     this.initTimeline();
@@ -299,16 +305,18 @@ createApp({
     },
 
     mounted() {
-        this.initTimeline();
+        this.$nextTick(() => {
+            this.initTimeline();
+        });
         this.fetchHealth();
         this.fetchData();
         this.startPolling();
         this.healthInterval = setInterval(() => this.fetchHealth(), 30000);
     },
+
     unmounted() {
         clearInterval(this.pollInterval);
         clearInterval(this.healthInterval);
-        // Clean up chart instance on unmount
         if (this.charts.timeline) {
             this.charts.timeline.destroy();
             this.charts.timeline = null;
