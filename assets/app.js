@@ -117,17 +117,17 @@ createApp({
                 this.logs       = data.logs || [];
                 this.pagination = { ...this.pagination, ...data.pagination };
                 this.stats      = {
-                    totalHits:     data.stats?.totalHits     ?? 0,
-                    uniqueIPs:     data.stats?.uniqueIPs     ?? 0,
-                    todayCount:    data.stats?.todayCount    ?? 0,
-                    yesterdayCount:data.stats?.yesterdayCount?? 0,
-                    botCount:      data.stats?.botCount      ?? 0,
-                    devices:       data.stats?.devices       ?? [],
-                    platforms:     data.stats?.platforms     ?? [],
-                    browsers:      data.stats?.browsers      ?? [],
-                    locations:     data.stats?.locations     ?? [],
-                    pages:         data.stats?.pages         ?? [],
-                    timeline:      data.stats?.timeline      ?? []
+                    totalHits:      data.stats?.totalHits      ?? 0,
+                    uniqueIPs:      data.stats?.uniqueIPs      ?? 0,
+                    todayCount:     data.stats?.todayCount     ?? 0,
+                    yesterdayCount: data.stats?.yesterdayCount ?? 0,
+                    botCount:       data.stats?.botCount       ?? 0,
+                    devices:        data.stats?.devices        ?? [],
+                    platforms:      data.stats?.platforms      ?? [],
+                    browsers:       data.stats?.browsers       ?? [],
+                    locations:      data.stats?.locations      ?? [],
+                    pages:          data.stats?.pages          ?? [],
+                    timeline:       data.stats?.timeline       ?? []
                 };
                 this.updateTimeline();
             } catch (e) {
@@ -237,9 +237,16 @@ createApp({
         initTimeline() {
             Chart.defaults.color = '#444';
             Chart.defaults.font.family = "'JetBrains Mono', monospace";
-            const ctx = document.getElementById('timelineChart');
-            if (!ctx) return;
-            this.charts.timeline = new Chart(ctx.getContext('2d'), {
+            const canvas = document.getElementById('timelineChart');
+            if (!canvas) return;
+            // Destroy any existing instance before creating a new one to
+            // prevent the "Cannot set properties of undefined (setting 'fullSize')"
+            // crash and the call-stack overflow it causes.
+            if (this.charts.timeline) {
+                this.charts.timeline.destroy();
+                this.charts.timeline = null;
+            }
+            this.charts.timeline = new Chart(canvas.getContext('2d'), {
                 type: 'bar',
                 data: {
                     labels: [],
@@ -263,8 +270,13 @@ createApp({
                 }
             });
         },
+
         updateTimeline() {
-            if (!this.charts.timeline) return;
+            // If the chart doesn't exist yet (e.g. first load), initialise it first.
+            if (!this.charts.timeline) {
+                this.initTimeline();
+                if (!this.charts.timeline) return;
+            }
             const tl = this.stats.timeline || [];
             this.charts.timeline.data.labels             = tl.map(t => t._id.slice(5));
             this.charts.timeline.data.datasets[0].data   = tl.map(t => t.count);
@@ -275,7 +287,14 @@ createApp({
     watch: {
         activeTab(tab) {
             if (tab === 'blocklist') this.fetchBlocklist();
-            if (tab === 'dashboard') this.$nextTick(() => { this.initTimeline(); this.updateTimeline(); });
+            // Re-initialise the chart when switching back to dashboard so the
+            // canvas is guaranteed to exist in the DOM before we draw to it.
+            if (tab === 'dashboard') {
+                this.$nextTick(() => {
+                    this.initTimeline();
+                    this.updateTimeline();
+                });
+            }
         }
     },
 
@@ -289,5 +308,10 @@ createApp({
     unmounted() {
         clearInterval(this.pollInterval);
         clearInterval(this.healthInterval);
+        // Clean up chart instance on unmount
+        if (this.charts.timeline) {
+            this.charts.timeline.destroy();
+            this.charts.timeline = null;
+        }
     }
 }).mount('#app');
