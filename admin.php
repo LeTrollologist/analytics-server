@@ -194,6 +194,6 @@ if (($_GET['pw'] ?? '') !== $ADMIN_PW) {
     </div>
 
     <!-- Link to our external Javascript -->
-    <script src="assets/app.js"></script>
+    <script src="assets/app.js?v=3.0.0"></script>
 </body>
 </html>
