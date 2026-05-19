@@ -25,7 +25,6 @@ createApp({
             pollInterval: null,
             healthInterval: null,
             selectedLog: null,
-            charts: {},
             blocklist: [],
             blockForm: { ip: '', reason: '' },
             toast: { msg: '', type: 'ok' },
@@ -240,15 +239,15 @@ createApp({
             const canvas = document.getElementById('timelineChart');
             if (!canvas) return; // not in DOM yet
 
-            if (this.charts.timeline) {
-                this.charts.timeline.destroy();
-                this.charts.timeline = null;
+            if (this.timelineChart) {
+                this.timelineChart.destroy();
+                this.timelineChart = null;
             }
 
             Chart.defaults.color = '#444';
             Chart.defaults.font.family = "'JetBrains Mono', monospace";
 
-            this.charts.timeline = new Chart(canvas.getContext('2d'), {
+            this.timelineChart = new Chart(canvas.getContext('2d'), {
                 type: 'bar',
                 data: {
                     labels: [],
@@ -278,14 +277,14 @@ createApp({
         },
 
         updateTimeline() {
-            if (!this.charts.timeline) {
+            if (!this.timelineChart) {
                 this.initTimeline();
-                if (!this.charts.timeline) return;
+                if (!this.timelineChart) return;
             }
             const tl = this.stats.timeline || [];
-            this.charts.timeline.data.labels           = tl.map(t => t._id.slice(5));
-            this.charts.timeline.data.datasets[0].data = tl.map(t => t.count);
-            this.charts.timeline.update('none');
+            this.timelineChart.data.labels           = tl.map(t => t._id.slice(5));
+            this.timelineChart.data.datasets[0].data = tl.map(t => t.count);
+            this.timelineChart.update('none');
         }
     },
 
@@ -314,9 +313,9 @@ createApp({
     unmounted() {
         clearInterval(this.pollInterval);
         clearInterval(this.healthInterval);
-        if (this.charts.timeline) {
-            this.charts.timeline.destroy();
-            this.charts.timeline = null;
+        if (this.timelineChart) {
+            this.timelineChart.destroy();
+            this.timelineChart = null;
         }
     }
 }).mount('#app');
