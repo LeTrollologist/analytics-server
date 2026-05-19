@@ -139,19 +139,23 @@ async function upsertSession(log) {
         await ActiveSession.findOneAndUpdate(
             { sessionId: log.sessionId },
             {
-                sessionId: log.sessionId,
-                ip: log.ip,
-                city: log.city,
-                region: log.region,
-                country: log.country,
-                page: log.page,
-                sector,
-                device: log.device,
-                browser: log.browser,
-                startedAt: log.timestamp || new Date(),
-                lastSeen: new Date(),
-                duration: 0,
-                euScrubbed: log.euScrubbed
+                $set: {
+                    ip: log.ip,
+                    city: log.city,
+                    region: log.region,
+                    country: log.country,
+                    page: log.page,
+                    sector,
+                    device: log.device,
+                    browser: log.browser,
+                    lastSeen: new Date(),
+                    euScrubbed: log.euScrubbed
+                },
+                $setOnInsert: {
+                    sessionId: log.sessionId,
+                    startedAt: log.timestamp || new Date(),
+                    duration: 0
+                }
             },
             { upsert: true }
         );
@@ -290,6 +294,19 @@ app.post('/log/event', ghCors, logLimiter, async (req, res) => {
             timestamp: new Date()
         });
 
+        const session = await ActiveSession.findOne({ sessionId });
+        if (session) {
+            const started = session.startedAt || new Date();
+            const duration = Math.max(0, (Date.now() - started.getTime()) / 60000);
+            await ActiveSession.findOneAndUpdate(
+                { sessionId },
+                {
+                    lastSeen: new Date(),
+                    duration
+                }
+            );
+        }
+
         res.status(200).send('OK');
     } catch (err) {
         console.error('Event Ingestion Error:', err.message);
@@ -306,9 +323,15 @@ app.post('/log/heartbeat', ghCors, logLimiter, async (req, res) => {
         const sessionId = (req.body.sessionId || '').slice(0, 64);
         const page = (req.body.page || '').slice(0, 200);
         const sector = (req.body.sector || 'Core SPA').slice(0, 40);
-        const duration = parseFloat(req.body.duration) || 0;
         
         if (!sessionId) return res.status(400).send('SESSION_ID REQUIRED');
+
+        const session = await ActiveSession.findOne({ sessionId });
+        let duration = 0;
+        if (session) {
+            const started = session.startedAt || new Date();
+            duration = Math.max(0, (Date.now() - started.getTime()) / 60000);
+        }
 
         await ActiveSession.findOneAndUpdate(
             { sessionId },
