@@ -8,9 +8,10 @@ const path     = require('path');
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '10kb' }));
+app.use('/assets', express.static(path.join(__dirname, 'assets')));
+
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-// Shared options — allow the GitHub Pages origin for /log and /api/health
 const corsOptions = {
     origin: 'https://letrollologist.github.io',
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
@@ -19,13 +20,11 @@ const corsOptions = {
 const ghCors = cors(corsOptions);
 
 // Handle OPTIONS preflight globally for every route.
-// Without this, the browser's preflight request gets no
-// Access-Control-Allow-Origin header and blocks the real request.
 app.options('*', cors(corsOptions));
 
 // ── Rate limiters ─────────────────────────────────────────────────────────────
 const logLimiter = rateLimit({
-    windowMs: 60 * 1000, max: 10,
+    windowMs: 60 * 1000, max: 20,
     standardHeaders: true, legacyHeaders: false, message: 'RATE LIMITED'
 });
 const adminLimiter = rateLimit({
@@ -44,12 +43,28 @@ const LogSchema = new mongoose.Schema({
     city: String, region: String, country: String, isp: String,
     lat: Number,  lon: Number,
     ua: String,   device: String, platform: String, browser: String,
-    page: String, screen: String,
+    page: String, screen: String, vp: String,
     referrer: String,
     sessionId: String,
-    flags: { type: [String], default: [] }
+    flags: { type: [String], default: [] },
+    lang: String,
+    tz: String,
+    dpr: Number,
+    col: String,
+    sessViews: Number,
+    loadTime: Number,
+    euScrubbed: { type: Boolean, default: false, index: true }
 });
 const Log = mongoose.model('Log', LogSchema);
+
+const EventSchema = new mongoose.Schema({
+    timestamp: { type: Date, default: Date.now, index: true },
+    sessionId: String,
+    event: { type: String, index: true },
+    data: mongoose.Schema.Types.Mixed,
+    page: String
+});
+const Event = mongoose.model('Event', EventSchema);
 
 const BlockSchema = new mongoose.Schema({
     ip:        { type: String, unique: true },
@@ -58,7 +73,24 @@ const BlockSchema = new mongoose.Schema({
 });
 const Block = mongoose.model('Block', BlockSchema);
 
-// ── UA parser ─────────────────────────────────────────────────────────────────
+const ActiveSessionSchema = new mongoose.Schema({
+    sessionId: { type: String, unique: true, index: true },
+    ip: String,
+    city: String,
+    region: String,
+    country: String,
+    page: String,
+    sector: String,
+    device: String,
+    browser: String,
+    startedAt: { type: Date, default: Date.now },
+    lastSeen: { type: Date, default: Date.now, index: true },
+    duration: { type: Number, default: 0 },
+    euScrubbed: { type: Boolean, default: false }
+});
+const ActiveSession = mongoose.model('ActiveSession', ActiveSessionSchema);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function parseUA(ua) {
     let device = 'Desktop Station', platform = 'Unknown OS', browser = 'Unknown Browser';
     if (!ua) return { device, platform, browser };
@@ -81,6 +113,51 @@ function detectFlags(ua) {
     const flags = [];
     if (!ua || /bot|crawl|spider|slurp|curl|wget|python|java|go-http/i.test(ua)) flags.push('bot');
     return flags;
+}
+
+function isEU(countryCode, tz) {
+    const euCountries = [
+        'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 
+        'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 
+        'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE', 'GB', 'CH', 'NO', 
+        'IS', 'LI'
+    ];
+    if (countryCode && euCountries.includes(countryCode.toUpperCase())) return true;
+    if (tz && tz.toLowerCase().startsWith('europe/')) return true;
+    return false;
+}
+
+async function upsertSession(log) {
+    try {
+        let sector = 'Core SPA';
+        const pageLower = (log.page || '').toLowerCase();
+        if (pageLower.includes('sketchin')) sector = 'Sketchbook';
+        else if (pageLower.includes('grovein')) sector = 'Grove';
+        else if (pageLower.includes('planner')) sector = 'Planner';
+        else if (pageLower.includes('index') || pageLower === '/' || pageLower.includes('gamein')) sector = 'Core SPA';
+
+        await ActiveSession.findOneAndUpdate(
+            { sessionId: log.sessionId },
+            {
+                sessionId: log.sessionId,
+                ip: log.ip,
+                city: log.city,
+                region: log.region,
+                country: log.country,
+                page: log.page,
+                sector,
+                device: log.device,
+                browser: log.browser,
+                startedAt: log.timestamp || new Date(),
+                lastSeen: new Date(),
+                duration: 0,
+                euScrubbed: log.euScrubbed
+            },
+            { upsert: true }
+        );
+    } catch (e) {
+        console.error('Session upsert failed:', e.message);
+    }
 }
 
 function requireAuth(req, res, next) {
@@ -118,38 +195,134 @@ app.post('/log', ghCors, logLimiter, async (req, res) => {
         let geo = {};
         if (!isLocal) {
             const g = await axios.get(
-                `http://ip-api.com/json/${cleanIp}?fields=status,city,regionName,country,isp,lat,lon,proxy,hosting`,
+                `http://ip-api.com/json/${cleanIp}?fields=status,city,regionName,country,countryCode,isp,lat,lon,proxy,hosting`,
                 { timeout: 4000 }
             ).catch(() => ({ data: {} }));
             geo = g.data || {};
         } else {
-            geo = { city: 'Localhost', regionName: 'LAN', country: 'Internal', isp: 'Local', lat: 0, lon: 0 };
+            geo = { city: 'Localhost', regionName: 'LAN', country: 'Internal', countryCode: 'US', isp: 'Local', lat: 0, lon: 0 };
         }
 
-        const ua     = (req.body.ua || '').slice(0, 500);
-        const uaInfo = parseUA(ua);
-        const flags  = detectFlags(ua);
+        const tz = req.body.tz || '';
+        const countryCode = geo.countryCode || '';
+        const euStatus = isEU(countryCode, tz);
+
+        let finalIp = cleanIp;
+        let city = geo.city || 'Void';
+        let region = geo.regionName || 'Void';
+        let country = geo.country || 'Void';
+        let lat = geo.lat || null;
+        let lon = geo.lon || null;
+        let ua = (req.body.ua || '').slice(0, 500);
+        let sessionId = (req.body.sessionId || '').slice(0, 64);
+        let flags  = detectFlags(ua);
+
         if (geo.proxy || geo.hosting) flags.push('vpn/proxy');
 
-        await Log.create({
-            ip:      cleanIp,
-            city:    geo.city       || 'Void',
-            region:  geo.regionName || 'Void',
-            country: geo.country    || 'Void',
+        if (euStatus) {
+            flags.push('EU-GDPR-Shield');
+            // IP masking compliance
+            if (cleanIp.includes('.')) {
+                const parts = cleanIp.split('.');
+                parts[3] = '0';
+                finalIp = parts.join('.');
+            } else if (cleanIp.includes(':')) {
+                finalIp = '[EU ANONYMIZED IP]';
+            }
+            city = '[EU PRIVACY SCRUBBED]';
+            region = '[EU PRIVACY SCRUBBED]';
+            lat = null;
+            lon = null;
+            sessionId = '[EU ANONYMIZED]';
+            ua = '[EU PRIVACY SCRUBBED]';
+        }
+
+        const uaInfo = parseUA(euStatus ? (req.body.ua || '') : ua);
+
+        const newLog = await Log.create({
+            ip:      finalIp,
+            city, region, country,
             isp:     geo.isp        || 'Dark Web',
-            lat: geo.lat || null,
-            lon: geo.lon || null,
+            lat, lon,
             ua, ...uaInfo,
             page:      (req.body.page      || 'Root').slice(0, 200),
             screen:    (req.body.screen    || 'Unknown').slice(0, 30),
+            vp:        (req.body.vp        || 'Unknown').slice(0, 30),
             referrer:  (req.body.referrer  || '').slice(0, 300),
-            sessionId: (req.body.sessionId || '').slice(0, 64),
-            flags
+            sessionId,
+            flags,
+            lang:      (req.body.lang      || 'en').slice(0, 10),
+            tz:        (req.body.tz        || 'UTC').slice(0, 40),
+            dpr:       parseFloat(req.body.dpr) || 1,
+            col:       (req.body.col       || '24bit').slice(0, 10),
+            sessViews: parseInt(req.body.sessViews) || 1,
+            loadTime:  typeof req.body.loadTime === 'number' ? req.body.loadTime : null,
+            euScrubbed: euStatus
         });
+
+        await upsertSession(newLog);
 
         res.status(200).send('OK');
     } catch (err) {
         console.error('Ingestion Error:', err.message);
+        res.status(500).send('ERR');
+    }
+});
+
+// =============================================================================
+// ROUTE 1B — Ingest custom events tracker SDK
+// POST /log/event
+// =============================================================================
+app.post('/log/event', ghCors, logLimiter, async (req, res) => {
+    try {
+        const sessionId = (req.body.sessionId || '').slice(0, 64);
+        const event = (req.body.event || '').slice(0, 50);
+        const page = (req.body.page || '').slice(0, 200);
+        const data = req.body.data || {};
+        
+        if (!event) return res.status(400).send('EVENT REQUIRED');
+
+        await Event.create({
+            sessionId,
+            event,
+            data,
+            page,
+            timestamp: new Date()
+        });
+
+        res.status(200).send('OK');
+    } catch (err) {
+        console.error('Event Ingestion Error:', err.message);
+        res.status(500).send('ERR');
+    }
+});
+
+// =============================================================================
+// ROUTE 1C ── Ingest active periodic page heartbeats
+// POST /log/heartbeat
+// =============================================================================
+app.post('/log/heartbeat', ghCors, logLimiter, async (req, res) => {
+    try {
+        const sessionId = (req.body.sessionId || '').slice(0, 64);
+        const page = (req.body.page || '').slice(0, 200);
+        const sector = (req.body.sector || 'Core SPA').slice(0, 40);
+        const duration = parseFloat(req.body.duration) || 0;
+        
+        if (!sessionId) return res.status(400).send('SESSION_ID REQUIRED');
+
+        await ActiveSession.findOneAndUpdate(
+            { sessionId },
+            {
+                lastSeen: new Date(),
+                page,
+                sector,
+                duration
+            }
+        );
+
+        res.status(200).send('OK');
+    } catch (err) {
+        console.error('Heartbeat Ingestion Error:', err.message);
         res.status(500).send('ERR');
     }
 });
@@ -173,6 +346,11 @@ app.get('/api/telemetry', adminLimiter, requireAuth, async (req, res) => {
         if (req.query.country  && req.query.country  !== 'ALL') match.country  = req.query.country;
         if (req.query.flag     && req.query.flag     !== 'ALL') match.flags    = req.query.flag;
 
+        if (req.query.euStatus) {
+            if (req.query.euStatus === 'SHIELDED') match.euScrubbed = true;
+            else if (req.query.euStatus === 'STANDARD') match.euScrubbed = { $ne: true };
+        }
+
         if (req.query.dateFrom || req.query.dateTo) {
             match.timestamp = {};
             if (req.query.dateFrom) match.timestamp.$gte = new Date(req.query.dateFrom);
@@ -187,13 +365,17 @@ app.get('/api/telemetry', adminLimiter, requireAuth, async (req, res) => {
             ? req.query.sort : 'timestamp';
         const sortDir = req.query.sortDir === 'asc' ? 1 : -1;
 
+        const activeSessionsCutoff = new Date(Date.now() - 15 * 60 * 1000);
+
         const [
-            logs, totalHits, uniqueIPsArr,
+            logs, activeSessions, totalHits, uniqueIPsArr,
             devices, platforms, browsers,
             locations, pages, timeline,
-            todayCount, yesterdayCount, botCount
+            todayCount, yesterdayCount, botCount,
+            avgLoadRes, euShieldedCount
         ] = await Promise.all([
             Log.find(match).sort({ [sortField]: sortDir }).skip(skip).limit(limit).lean(),
+            ActiveSession.find({ lastSeen: { $gte: activeSessionsCutoff } }).sort({ lastSeen: -1 }).lean(),
             Log.countDocuments(match),
             Log.distinct('ip', match),
             Log.aggregate([{ $match: match }, { $group: { _id: { $ifNull: ['$device',   'Unknown'] }, count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
@@ -211,16 +393,25 @@ app.get('/api/telemetry', adminLimiter, requireAuth, async (req, res) => {
                 $gte: new Date(new Date().setHours(0,0,0,0) - 86400000),
                 $lt:  new Date(new Date().setHours(0,0,0,0))
             }}),
-            Log.countDocuments({ ...match, flags: 'bot' })
+            Log.countDocuments({ ...match, flags: 'bot' }),
+            Log.aggregate([
+                { $match: { ...match, loadTime: { $ne: null } } },
+                { $group: { _id: null, avgLoad: { $avg: '$loadTime' } } }
+            ]),
+            Log.countDocuments({ ...match, euScrubbed: true })
         ]);
+
+        const avgLoadTime = avgLoadRes.length > 0 ? Math.round(avgLoadRes[0].avgLoad) : 0;
 
         res.json({
             logs,
+            activeSessions,
             pagination: { page, limit, total: totalHits, pages: Math.ceil(totalHits / limit) },
             stats: {
                 totalHits, uniqueIPs: uniqueIPsArr.length,
                 todayCount, yesterdayCount, botCount,
-                devices, platforms, browsers, locations, pages, timeline
+                devices, platforms, browsers, locations, pages, timeline,
+                avgLoadTime, euShieldedCount
             }
         });
     } catch (err) {
@@ -273,7 +464,6 @@ app.delete('/api/blocklist/:ip', adminLimiter, requireAuth, async (req, res) => 
 
 // =============================================================================
 // ROUTE 5 — Health check
-// GET /api/health
 // =============================================================================
 app.get('/api/health', ghCors, async (req, res) => {
     const status = {
@@ -291,7 +481,6 @@ app.get('/api/health', ghCors, async (req, res) => {
 
 // =============================================================================
 // ROUTE 6 — Admin dashboard HTML shell
-// GET /admin?pw=...
 // =============================================================================
 app.get('/admin', adminLimiter, (req, res) => {
     const secret = process.env.ADMIN_PW;
@@ -300,7 +489,38 @@ app.get('/admin', adminLimiter, (req, res) => {
     res.sendFile(path.join(__dirname, 'assets', 'admin.html'));
 });
 
-app.use('/assets', express.static(path.join(__dirname, 'assets')));
+
+
+
+// Background job: Purge EU citizen logs older than 24 hours (GDPR data minimization compliance)
+setInterval(async () => {
+    try {
+        const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours retention limit
+        
+        const resLog = await Log.deleteMany({
+            $or: [
+                { euScrubbed: true },
+                { country: { $in: ['Austria', 'Belgium', 'Bulgaria', 'Croatia', 'Cyprus', 'Czechia', 'Denmark', 'Estonia', 'Finland', 'France', 'Germany', 'Greece', 'Hungary', 'Ireland', 'Italy', 'Latvia', 'Lithuania', 'Luxembourg', 'Malta', 'Netherlands', 'Poland', 'Portugal', 'Romania', 'Slovakia', 'Slovenia', 'Spain', 'Sweden', 'United Kingdom', 'Switzerland', 'Norway', 'Iceland', 'Liechtenstein'] } },
+                { tz: { $regex: /^europe\//i } }
+            ],
+            timestamp: { $lt: cutoff }
+        });
+
+        const resSess = await ActiveSession.deleteMany({
+            $or: [
+                { euScrubbed: true },
+                { country: { $in: ['Austria', 'Belgium', 'Bulgaria', 'Croatia', 'Cyprus', 'Czechia', 'Denmark', 'Estonia', 'Finland', 'France', 'Germany', 'Greece', 'Hungary', 'Ireland', 'Italy', 'Latvia', 'Lithuania', 'Luxembourg', 'Malta', 'Netherlands', 'Poland', 'Portugal', 'Romania', 'Slovakia', 'Slovenia', 'Spain', 'Sweden', 'United Kingdom', 'Switzerland', 'Norway', 'Iceland', 'Liechtenstein'] } }
+            ],
+            lastSeen: { $lt: cutoff }
+        });
+
+        if (resLog.deletedCount > 0 || resSess.deletedCount > 0) {
+            console.log(`[GDPR SHIELD] Automatically purged ${resLog.deletedCount} EU citizen telemetry logs and ${resSess.deletedCount} session logs matching 24h retention limit.`);
+        }
+    } catch (err) {
+        console.error('[GDPR SHIELD] Error running data retention purge:', err.message);
+    }
+}, 60 * 60 * 1000); // run every hour
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log('SENTINEL ONLINE — Port:', PORT));
